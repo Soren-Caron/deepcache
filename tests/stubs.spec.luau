@@ -73,25 +73,28 @@ t.describe("core module surface", function()
 
 	t.it("stubs fail loudly rather than returning nil", function()
 		expect(function()
-			modules.Quantize.encodePosition(1)
+			modules.Ledger.new()
 		end).toThrow("unimplemented")
 		expect(function()
-			modules.Ledger.new()
+			modules.Rating.new(0)
 		end).toThrow("unimplemented")
 	end)
 end)
 
 -- Worklist -------------------------------------------------------------------
 
-t.describe("M1 netcode", function()
-	t.todo("Quantize: position/yaw/unit roundtrip within error bounds")
-	t.todo("Snapshot: encode/decode identity, 81 fits / 82 asserts")
-	t.todo("Snapshot: delta reconstruction matches keyframes over 200 ticks")
-	t.todo("Interpolator: sampling, gap handling, 80ms extrapolation cutoff")
-	t.todo("History: rewind exact / between / before-window / after-now")
-	t.todo("EntityState: transition table enforcement")
-	t.todo("Steering: seek converges, separation prevents overlap")
-	t.todo("DamageModel: falloff boundaries, armor, negative guards")
+-- M1 pure core is complete: see quantize / snapshot / history / interpolator /
+-- sim spec files. What remains in M1 is Roblox adapter code (TickService,
+-- EntityService, ReplicationService, CombatService, PredictionController,
+-- MovementGuard, EntityRenderer), which is verified in Studio via MCP rather
+-- than here.
+t.describe("M1 adapters (Studio-verified)", function()
+	t.todo("TickService: 20Hz accumulator, per-phase timing")
+	t.todo("EntityService: 40 entities stepped, no server-side Instances")
+	t.todo("ReplicationService: interest management, bandwidth under budget")
+	t.todo("CombatService: fire validation pipeline end to end")
+	t.todo("PredictionController: predict + reconcile")
+	t.todo("MovementGuard: decaying violation score")
 end)
 
 t.describe("M2 loop", function()

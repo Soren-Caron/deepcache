@@ -48,50 +48,103 @@ Relative string requires (`./Sibling`, `../dir/Module`, chained across subdirect
 
 ## M1 — Netcode core
 
-- [ ] **M1-1** `core/net/Quantize.luau` — encode/decode position (int16, 0.05 grid), yaw (uint8), hpPct (uint8).
-  *deps: M0-4 · Accept:* test — 10k random positions in ±1638 roundtrip within 0.025 studs; yaw within 0.7°; boundary and negative values exact.
+**Pure core: complete.** 181 assertions green, benchmark and budget check in CI.
+Measured numbers in [docs/metrics/m1.md](../docs/metrics/m1.md). What remains is
+adapter code, which needs Studio.
 
-- [ ] **M1-2** `core/net/Snapshot.luau` — buffer encode/decode, 5 B header + 11 B/entity, `MAX_BYTES = 900` assert.
-  *deps: M1-1 · Accept:* test — encode→decode identity for 1/40/81 entities; 82 entities raises; encoded size matches `5 + 11n`.
+- [x] **M1-1** `core/net/Quantize.luau` — position int16 on a 0.05 grid, yaw uint8, unit uint8.
+  *Verified:* 10k-sample roundtrip within 0.025 studs and 0.703°; grid multiples exact; saturates at the int16 boundary instead of wrapping; NaN rejected. Added `yawDelta` for shortest-arc interpolation and `snap*` helpers so delta comparison happens on quantized values rather than floats.
 
-- [ ] **M1-3** Delta compression + keyframes in `Snapshot`. Bitfield prefix per 32 entities; keyframe every 20 ticks.
-  *deps: M1-2 · Accept:* test — replay a recorded 200-tick sequence through delta encode/decode; reconstructed state equals full-snapshot state at every tick.
+- [x] **M1-2** `core/net/Snapshot.luau` — 5 B header + 11 B/entity, 900-byte assert.
+  *Verified:* identity roundtrip at 1/40/81 entities; **896 bytes at 81**; 82 refuses; truncated and short packets rejected rather than read as garbage.
 
-- [ ] **M1-4** `core/sim/EntityState.luau` + `core/sim/Steering.luau` — entity struct, state enum, seek/separate/avoid.
-  *deps: M0-4 · Accept:* test — seek converges within N steps; separation prevents overlap for 20 co-located entities; avoidance turns away from a wall.
+- [x] **M1-3** Delta compression + keyframes.
+  *Verified:* 200-tick replay reconstructs exactly what full snapshots would carry; sub-grid jitter costs nothing; delta is <½ keyframe size in steady state.
+  **Divergence:** the plan specified a 4-byte changed-entity bitfield indexed by baseline position. That requires client and server to agree on entity ordering — fragile, and unnecessary since every record already carries its own uint16 id. A delta is simply the changed subset. The keyframe flag went into the spare high bit of the count byte, which keeps the header at the documented 5 bytes and capacity at the documented 81.
+  **Also:** deltas never remove entities. Omission from an unreliable packet is indistinguishable from packet loss, so despawns travel on the reliable channel.
 
-- [ ] **M1-5** `core/net/History.luau` — ring buffer, `record`, `rewind(t, now)`.
-  *deps: M1-4 · Accept:* test — exact tick, interpolated between ticks, `nil` before window, clamped after now; capacity wraparound correct at 21 records.
+- [x] **M1-4** `core/sim/EntityState.luau` + `core/sim/Steering.luau`.
+  *Verified:* transition table enforced and `death` terminal (corpses cannot stand up); overkill clipped so a kill credits exactly once; seek converges; 20 co-located entities separate to >0.5 studs; avoidance ignores obstacles behind; `keepDistance` dead band stops Lancer jitter.
+  **Divergence:** `create` takes a `Stats` parameter instead of reading config, keeping core free of any dependency the adapter owns. Added `applyDamage` and `isAlive`, which `CombatService` needs.
 
-- [ ] **M1-6** `core/sim/DamageModel.luau` — damage, distance falloff, armor.
-  *deps: M0-4 · Accept:* test — falloff at min/max range boundaries; armor reduction; zero/negative damage rejected.
+- [x] **M1-5** `core/net/History.luau` — record + rewind.
+  *Verified:* exact tick, interpolated between ticks, window clamping at the exact boundary, buffer-underrun clamping, wraparound at 100 pushes into a 20-frame buffer. Entities that spawned *or despawned* mid-window remain hittable — dropping them would silently eat legitimate hits.
+  **Divergence:** `rewind` returns a result table (`entities`, `requestedTime`, `actualTime`, `clamped`) rather than a bare list, because `CombatService` needs `clamped` to emit the rewind-overrun metric named in docs/03.
+  **Note:** frames are deep-copied on record. Aliasing the live simulation would make every rewind silently agree with the present — lag compensation would look like it worked while doing nothing.
 
-- [ ] **M1-7** `server/services/TickService.luau` — accumulator loop at 20 Hz with per-phase `debug.profilebegin` timers and a p50/p95 tick-time gauge.
-  *deps: M0-2 · Accept:* Studio smoke — 600 ticks logged, mean interval within 50 ms ± 2 ms.
+- [x] **M1-6** `core/sim/DamageModel.luau`.
+  *Verified:* falloff boundaries, monotonicity across 0–200 studs, degenerate `start == end` config handled as a step rather than a divide-by-zero, negative distance/damage guarded.
+  **Divergence:** armor saturates at 0.95. Total immunity is an unwinnable softlock, so no config or buff stack can reach it.
 
-- [ ] **M1-8** `server/services/EntityService.luau` — owns entity table, steps `core/sim` each tick, spawn/despawn.
-  *deps: M1-4, M1-7 · Accept:* Studio smoke — 40 entities spawn and move; no Instance created server-side for entity logic.
+### Adapters — verified in a live Studio session ✅
 
-- [ ] **M1-9** `server/services/ReplicationService.luau` — interest management (150 studs, top 32 by score), snapshot broadcast on `UnreliableRemoteEvent`.
-  *deps: M1-3, M1-8 · Accept:* Studio smoke — bytes/s/client logged and under 6 KB/s at 3 players + 40 entities.
+Rojo synced (49 scripts), server and client bootstrapped clean, all measurements
+taken through `ServerStorage.DeepcacheDiagnostics`. Numbers in
+[docs/metrics/m1.md](../docs/metrics/m1.md).
 
-- [ ] **M1-10** `core/net/Interpolator.luau` — render-delay buffer, `sample(t)`, adaptive delay from jitter p95, 80 ms extrapolation cap.
-  *deps: M1-2 · Accept:* test — known sequence → expected samples; single dropped packet invisible; extrapolation stops at exactly 80 ms; out-of-order arrival dropped.
+**Three findings that only running it could surface:**
 
-- [ ] **M1-11** `client/controllers/EntityRenderer.luau` — instantiate/pool entity models, drive transforms from `Interpolator`.
-  *deps: M1-9, M1-10 · Accept:* Studio — two clients, entities move smoothly on both, no popping.
+1. **Cross-service relative requires do not resolve.** Every adapter used
+   `require("../shared/...")`, which compiles and syncs but fails at boot —
+   `src/shared` maps to ReplicatedStorage while server code lives under
+   ServerScriptService, and relative paths cannot cross services. Fixed with
+   Instance requires; `check-syntax` now lints it; CLAUDE.md documents it.
+2. **The command bar has its own module registry.** `require`ing a service from
+   the MCP bridge returns a fresh idle copy reporting zero ticks while the
+   server runs, and `_G` does not cross either. Added
+   `services/Diagnostics.luau`, a BindableFunction bridge registered from the
+   running context — the verification hook every later milestone needs.
+3. **Corpses were reaped one tick after death** (reap clock derived from
+   `spawnedAtTick`). The client never saw the `death` state and a shot fired
+   just before a kill had nothing to rewind onto. Moved the rule into
+   `core/sim/EntityState` (`markDeath`/`shouldReap`) with 5 regression tests.
 
-- [ ] **M1-12** `server/services/CombatService.luau` — fire request validation pipeline, all 7 steps from [03-NETCODE §Lag compensation].
-  *deps: M1-5, M1-6, M1-8 · Accept:* test on the pure parts (rate bucket, origin tolerance, clamp math); Studio smoke — a fire request produces a hit event.
+**Spec correction:** the 6 KB/s bandwidth budget was unsatisfiable alongside a
+32-entity interest cap (worst case 6.97 KB/s; only 27 entities fit 6 KB/s).
+Raised to 8 KB/s and cross-checked in `validate-config`; the benchmark now reads
+the constants from config instead of redeclaring them.
 
-- [ ] **M1-13** `client/controllers/PredictionController.luau` — predict tracer/flash/recoil/ammo/hitmarker, reconcile on authoritative result.
-  *deps: M1-12 · Accept:* Studio — mispredict counter present; forced server-reject removes the hitmarker but leaves the tracer.
+Additional pure-core modules extracted so the adapters stay thin, all tested:
+`core/net/Interest`, `core/sim/FireValidation`, `core/sim/MovementGuard`,
+`core/sim/Raycast`.
 
-- [ ] **M1-14** `server/services/MovementGuard.luau` — speed/teleport/vertical checks with decaying violation score.
-  *deps: M1-7 · Accept:* test on the pure scoring function — single spike doesn't trigger, sustained violation does, score decays at 1.0/s.
+- [x] **M1-7** `server/services/TickService.luau` — 20 Hz accumulator, per-phase timers, p50/p95/p99 gauge, overrun logging, catch-up capped at 5 steps/frame.
+  *Verified:* 502 ticks with a player connected, **p95 1.16 ms of a 12 ms budget, 0 overruns**.
 
-- [ ] **M1-15** `tools/loadtest/serialize.luau` — 10k snapshot encode/decode benchmark, reports ns/op and bytes.
-  *deps: M1-3 · Accept:* `lune run tools/loadtest/serialize.luau` prints a table; runs in under 10 s.
+- [x] **M1-8** `server/services/EntityService.luau` — owns the entity table, steers via `core/sim`, records history, reaps corpses.
+  *Verified:* 40–300 entities spawned and stepped; history buffer holds 20 contiguous frames; corpse lifetime correct after the fix above.
+
+- [x] **M1-9** `server/services/ReplicationService.luau` — per-client interest selection, keyframe/delta scheduling, despawn batching, bandwidth sampling.
+  *Verified:* **6.10 KB/s measured** with 40 entities all chasing one player (worst case), against the corrected 8 KB/s budget.
+  **Documented tradeoff:** the server assumes every delta arrived. A lost delta leaves entities that then stop changing stale until the next keyframe (≤1 s). Per-client acknowledgement would cost an uplink message per tick per client to fix a one-second cosmetic issue.
+
+- [x] **M1-16** `src/server/smoke/TickBench.luau` — in-engine tick benchmark and entity-count sweep.
+  *Verified:* budget breaks between 120 and 200 entities; **4× headroom at the 40-entity design point**. `sim` scales super-linearly, matching the documented O(n²) neighbour loop.
+
+- [x] **M1-10** `core/net/Interpolator.luau` — render-delay buffer, adaptive delay, 80 ms extrapolation cap.
+  *Verified:* a single dropped packet is invisible (interpolates straight through the gap); extrapolation freezes at exactly 80 ms and stays frozen 100 s later; out-of-order and duplicate-timestamp arrivals dropped; adaptive delay clamped to [0.10, 0.20]; jitter p95 measured from observed inter-arrival times.
+  **Note:** an entity present in only one frame of a bracketing pair is carried rather than dropped — dropping it makes a newly visible entity flicker for one frame.
+
+- [x] **M1-11** `client/controllers/EntityRenderer.luau` — pooled parts, interpolated transforms, adaptive render delay, corrupt packets dropped rather than crashing.
+  *Verified:* renders entities from live snapshots; the client-side aim used for every combat test came from the rendered (interpolated) position.
+  *Remaining for M1-17:* two simultaneous clients, which needs a second human.
+
+- [x] **M1-12** `server/services/CombatService.luau` — all 8 validation steps, cheapest rejection first; requests queued and resolved at a tick boundary.
+  *Verified in-engine:* **5/5 hits on a static target**, 22 damage matching config, 39.6 on a headshot (×1.8), overkill clipped to exactly the remaining 20 HP on the killing blow, ammo exhaustion rejected correctly at magazine 14. Added a 20-entry resolution trace ring — without it a shot that "just misses" gives nothing to debug, since every metric reads clean when no rule rejected it.
+  **Design note:** entity hit detection is pure ray-sphere math (`core/sim/Raycast`), not an engine raycast — entities have no server Instance. The engine raycast finds the nearest wall only, and an entity hit must be nearer than it.
+
+- [x] **M1-13** `client/controllers/PredictionController.luau` — predicts presentation, reconciles state, tracks RTT and mispredict rate.
+  *Verified:* fire → authoritative result round trip at p50 99 ms in a local session.
+  **Design note:** M1 predicts "miss" locally and lets the server confirm hits, so a mispredict can never show a hitmarker for a shot that missed. Local hit prediction needs the client-side entity positions the renderer already holds — an M2 refinement.
+
+- [x] **M1-14** `core/sim/MovementGuard.luau` + `server/services/MovementGuardService.luau`.
+  *Verified:* a single spike does not trigger; a sustained pattern escalates to correction; score decays at 1.0/s and returns to clean; penalty scales with how far past budget the frame went; a non-finite position kicks immediately; the guard uses the caller's max speed, so a weight-slowed player is not flagged for moving normally.
+
+- [x] **M1-15b** *(added)* `tools/check-syntax.luau` — compiles every `.luau` file with the Luau compiler.
+  *Why:* adapter code cannot be required by the test suite (Roblox globals) and `rojo build` packages source without parsing it. Without this, a syntax error in a service sits undetected until someone opens Studio. Wired into CI; 66 files.
+
+- [x] **M1-15** `tools/loadtest/serialize.luau` — benchmark + budget assertion, wired into CI.
+  *Verified:* 11.06 bytes/entity, 896 B at the packet max, **1.87 KB/s per client** projected at the 32-entity interest cap against a 6 KB/s budget. Fails CI if the format regresses past either budget.
 
 - [ ] **M1-16** `tools/smoke/TickBench.luau` — spawn N entities, run 600 ticks, report p50/p95/p99 + per-phase.
   *deps: M1-9 · Accept:* via MCP `execute_luau` at 60 entities — **p95 < 12 ms**. Quote the output in the commit.

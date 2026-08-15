@@ -79,6 +79,27 @@ do
 		fail("Netcode.INTEREST_MAX", `{Netcode.INTEREST_MAX} exceeds packet capacity of {capacity} entities`)
 	end
 end
+-- The interest cap and the bandwidth budget must be mutually satisfiable.
+-- They were not: 32 entities at 20Hz costs 6.97 KB/s worst case against a
+-- 6 KB/s budget, which only showed up when a live session was measured.
+do
+	local perTick = Netcode.SNAPSHOT_HEADER_BYTES + Netcode.INTEREST_MAX * Netcode.SNAPSHOT_ENTITY_BYTES
+	local worstKbps = perTick * Netcode.TICK_RATE / 1024
+	if worstKbps > Netcode.BANDWIDTH_BUDGET_KBPS then
+		fail(
+			"Netcode.BANDWIDTH_BUDGET_KBPS",
+			string.format(
+				"%d entities at %dHz costs %.2f KB/s worst case, over the %.2f KB/s budget. "
+					.. "Lower INTEREST_MAX to %d or raise the budget.",
+				Netcode.INTEREST_MAX,
+				Netcode.TICK_RATE,
+				worstKbps,
+				Netcode.BANDWIDTH_BUDGET_KBPS,
+				math.floor((Netcode.BANDWIDTH_BUDGET_KBPS * 1024 / Netcode.TICK_RATE - Netcode.SNAPSHOT_HEADER_BYTES) / Netcode.SNAPSHOT_ENTITY_BYTES)
+			)
+		)
+	end
+end
 if Netcode.RENDER_DELAY_MIN > Netcode.RENDER_DELAY_MAX then
 	fail("Netcode.RENDER_DELAY_MIN", "greater than RENDER_DELAY_MAX")
 end

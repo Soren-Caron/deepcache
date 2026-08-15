@@ -35,6 +35,9 @@ export type Entity = {
 	targetId: number?,
 	hitboxRadius: number,
 	spawnedAtTick: number,
+	--- Set the tick the entity entered `death`. Drives corpse lifetime, which
+	--- must not be derived from spawnedAtTick — see EntityService.step.
+	diedAtTick: number?,
 }
 
 export type Zone = "Perimeter" | "Processing" | "Vault"

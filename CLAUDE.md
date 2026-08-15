@@ -33,6 +33,30 @@ Use **relative string requires** everywhere in `src/`: `require("./Sibling")` an
 
 Inside an `init.luau`, Lune resolves `./` against the *parent* directory, not the file's own directory. That's why `tests/init.luau` uses `@self/`. Avoid `init.luau` in `src/` entirely and the ambiguity never arises.
 
+**Relative requires cannot cross services.** `src/shared` maps to `ReplicatedStorage.Shared`, `src/server` to `ServerScriptService.Server`, `src/client` to `StarterPlayerScripts.Client`. Relative paths traverse the DataModel, so they work *within* one mapped subtree and fail across two: `require("../shared/config/Netcode")` from a server module resolves to `ServerScriptService.shared`, which does not exist. It compiles, syncs, and then fails at boot.
+
+From `src/server` or `src/client`, reach shared code by Instance:
+
+```lua
+local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
+local NetcodeConfig = require(Shared.config.Netcode)
+```
+
+Within a subtree, keep using relative requires (`require("./EntityService")`, `require("../services/TickService")`). `lune run tools/check-syntax` lints the cross-service case.
+
+## Studio verification runs in a separate module registry
+
+The command bar — and therefore the MCP bridge — has its own `require` cache. `require(ServerScriptService.Server.services.TickService)` from there returns a **fresh, idle copy**, not the instance the boot script started, and `_G` does not cross either. It will cheerfully report zero ticks while the server is visibly running.
+
+Go through `ServerStorage.DeepcacheDiagnostics` (a `BindableFunction`) instead. `Bootstrap.server` registers handlers from the running context; the bridge invokes them:
+
+```lua
+local bridge = game:GetService("ServerStorage"):WaitForChild("DeepcacheDiagnostics")
+return bridge:Invoke("bench", { entities = 40, ticks = 200 })
+```
+
+Register a new handler in `Bootstrap.server` rather than reaching into services from the command bar.
+
 ## Conventions
 
 - **Luau, strict mode.** `--!strict` at the top of every file. Fix type errors rather than casting to `any`.

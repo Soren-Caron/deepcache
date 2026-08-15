@@ -40,6 +40,11 @@ jobs:
       - name: Encoding check (no UTF-8 BOMs)
         run: lune run tools/check-encoding
 
+      # Adapter code touches Roblox globals, so the test suite cannot load it
+      # and `rojo build` does not parse it. This compiles every file.
+      - name: Syntax check
+        run: lune run tools/check-syntax
+
       - name: Config validation
         run: lune run tools/validate-config
 
@@ -48,6 +53,11 @@ jobs:
 
       - name: Unit tests
         run: lune run tests
+
+      # Bounds the wire format and asserts the bandwidth budget, so a format
+      # regression fails here rather than in a playtest.
+      - name: Serialization benchmark and budget check
+        run: lune run tools/loadtest/serialize
 
       - name: Rojo build
         run: rojo build -o /tmp/deepcache.rbxl

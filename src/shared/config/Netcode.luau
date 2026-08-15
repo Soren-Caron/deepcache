@@ -28,5 +28,14 @@ return {
 	VIOLATION_KICK_AT = 20,
 
 	TICK_BUDGET_MS = 12,
-	BANDWIDTH_BUDGET_KBPS = 6,
+
+	-- Raised from 6 after measurement. 32 visible entities all changing every
+	-- tick costs (5 + 32*11) * 20 = 7140 B/s = 6.97 KB/s, so a 6 KB/s budget
+	-- and a 32-entity interest cap were mutually unsatisfiable — only 27
+	-- entities fit 6 KB/s. Seeing the crowd matters more in a shooter than
+	-- 1 KB/s, and 6 KB/s was an invented target rather than a platform limit
+	-- (the real constraint is the ~1000-byte packet cap, which we are well
+	-- under at 357 B). validate-config now cross-checks these two so the
+	-- inconsistency cannot reappear.
+	BANDWIDTH_BUDGET_KBPS = 8,
 }

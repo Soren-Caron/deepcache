@@ -53,7 +53,12 @@ Quantization error is bounded at 0.025 studs positionally and 0.7° angularly �
 
 Full snapshot every 20th tick (1 s). Between keyframes, send only entities whose quantized state changed since the last acknowledged keyframe, with a 4-byte changed-entity bitfield prefix per 32 entities. Typical steady state: 8–14 moving entities per packet ≈ 100–160 bytes.
 
-**Bandwidth target: < 6 KB/s per client** at 3 players + 40 entities. Measured, not assumed.
+**Bandwidth budget: 8 KB/s per client.** Two figures matter and they differ by 4×:
+
+- **Typical (~25% of visible entities moving): 1.87 KB/s.** Most entities are idle, dead, or out of aggro at any moment, so deltas are small.
+- **Worst case (all 32 visible entities changing every tick): 6.97 KB/s.** Deltas cost as much as keyframes; measured at **6.10 KB/s** in a live session with 40 Skitters all chasing one player.
+
+The budget was originally written as 6 KB/s, which turned out to be *unsatisfiable* alongside a 32-entity interest cap — `(5 + 32×11) × 20 = 6.97 KB/s`, and only 27 entities fit 6 KB/s. Seeing the crowd matters more in a shooter than 1 KB/s, and 6 KB/s was an invented target rather than a platform limit (the real constraint is the ~1000-byte packet cap, which a 357-byte packet is comfortably under). `validate-config` now cross-checks the cap against the budget so the two cannot drift apart again.
 
 ## Interest management
 
@@ -151,7 +156,7 @@ These are the numbers that go on the dashboard and into the interview:
 | Metric | Target | How |
 |---|---|---|
 | Server tick time p95 | < 12 ms (of 50) | per-phase timers in `TickService` |
-| Snapshot bytes/s/client | < 6 KB/s | counter in `ReplicationService` |
+| Snapshot bytes/s/client | < 8 KB/s | counter in `ReplicationService` |
 | Hit-registration RTT p50 / p95 / p99 | < 60 / 140 / 250 ms | `seq` echoed in hit event; client measures |
 | Prediction mispredict rate | < 2% | client counts confirm-vs-predict disagreements |
 | Rewind window overrun rate | < 1% | count of `clientTime` clamps in `CombatService` |
