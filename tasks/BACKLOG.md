@@ -1,0 +1,257 @@
+# Backlog
+
+Atomic, dependency-ordered tasks. Each names its dependencies, the files it touches, and a **machine-checkable** acceptance test. A task is done when its acceptance command passes — not when the code looks right.
+
+Work top to bottom. Tasks at the same indent level with no shared dependency can be done in any order or in parallel.
+
+Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **⚠ human** = needs a person
+
+---
+
+## M0 — Skeleton ✅ complete (except M0-8, human)
+
+- [x] **M0-1** Toolchain. rokit 1.2.0 installed; `rokit.toml` pins `rojo@7.7.0`, `lune@0.10.5`. `git init` + `.gitignore` done.
+  *Verified:* `rojo --version` → 7.7.0, `lune --version` → 0.10.5. Note: rokit gates new tools behind `rokit trust <tool>`, which is interactive — script it explicitly.
+
+- [x] **M0-2** Rojo project. `default.project.json` maps `src/shared`→ReplicatedStorage.Shared, `src/server`→ServerScriptService.Server, `src/client`→StarterPlayerScripts.Client.
+  *Verified:* `rojo build` exits 0, produces a place file.
+
+- [x] **M0-3** Test runner. `tests/framework.luau` + `tests/init.luau` (auto-discovers `*.spec.luau`). describe/it/expect, deepEqual, approx, toThrow, `never()`, todo.
+  *Verified:* `lune run tests` → exit 0 clean, exit 1 with a failing spec present.
+  **Divergence from spec:** the original acceptance called for "one deliberately failing test" living in the suite. A permanently-red suite means green carries no information, so the failure-detection check moved to `tools/selftest.luau` (13 checks) and the suite stays green. Unimplemented work is tracked with `todo`, which reports as pending and never fails.
+
+- [x] **M0-4** Core module stubs. 21 modules across net/sim/director/economy/discovery/anim/level/util, all `--!strict` with real type contracts.
+  *Verified:* `lune run tests` → 43 passed, 24 todo, exit 0.
+  **Divergence:** `util/{Rng,Ring,Result,Clock}` and `core/Types` are fully implemented rather than stubbed — everything depends on them, they're ~60 lines each, and a seeded RNG is required by every deterministic test. They have real specs (38 assertions).
+
+- [x] **M0-5** Config tables + validator. 8 config modules; `tools/validate-config.luau` checks types, ranges, and cross-invariants.
+  *Verified:* passes clean; rejects `SNAPSHOT_MAX_BYTES=1200` (two ways), `INTEREST_MAX=120` (exceeds packet capacity), `HISTORY_TICKS=2` (shorter than the lag-comp window). Also catches an insurance config that would make insurance a faucet, and non-monotonic weight tiers.
+
+- [x] **M0-6** Backend skeleton. Fastify 5 + TS strict + vitest. `/healthz`, `/readyz`, `/metrics`, structured 404/500. `docker-compose.yml` with postgres:16-alpine.
+  *Verified:* `npm run typecheck` clean, 8 vitest tests pass, server boots and returns `{"status":"ok","version":"0.1.0"}` over HTTP on 8787.
+  **Blocked:** Docker Desktop was not running, so Postgres was not started. Nothing in M0 depends on it — `/healthz` deliberately does not touch the DB so a DB outage never triggers a restart. **Start Docker Desktop and run `docker compose up -d` before M3.**
+
+- [x] **M0-7** CI. `.github/workflows/ci.yml` — `luau` job (encoding, config, selftest, tests, rojo build, artifact upload) and `backend` job (typecheck, test, build). rokit installed from the pinned release rather than a third-party action.
+  *Not yet verified on GitHub* — no remote configured. Verify on first push.
+  **Divergence:** no `sim` job; `sim/` doesn't exist until M3. Added rather than omitted: an encoding guard (below).
+
+- [x] **M0-9** *(added during M0)* `tools/check-encoding.luau` — fails if any `.luau` file carries a UTF-8 BOM. Added after hitting the BOM problem twice: PowerShell 5.1 has no `utf8NoBOM`, and Luau's error points at line 1 of the victim file rather than at whatever wrote it.
+  *Verified:* passes across 41 `.luau` files; wired into CI.
+
+- [ ] **⚠ human M0-8** Create the Roblox experience, note universe + place IDs, enable *Allow HTTP Requests* and *Studio Access to API Services*. Put IDs in `backend/.env`.
+
+### Verified in Studio during M0
+
+Relative string requires (`./Sibling`, `../dir/Module`, chained across subdirectories) work identically in Roblox and Lune. `@self/` works **only** in Lune. This is the require convention for all of `src/` — recorded in CLAUDE.md.
+
+---
+
+## M1 — Netcode core
+
+- [ ] **M1-1** `core/net/Quantize.luau` — encode/decode position (int16, 0.05 grid), yaw (uint8), hpPct (uint8).
+  *deps: M0-4 · Accept:* test — 10k random positions in ±1638 roundtrip within 0.025 studs; yaw within 0.7°; boundary and negative values exact.
+
+- [ ] **M1-2** `core/net/Snapshot.luau` — buffer encode/decode, 5 B header + 11 B/entity, `MAX_BYTES = 900` assert.
+  *deps: M1-1 · Accept:* test — encode→decode identity for 1/40/81 entities; 82 entities raises; encoded size matches `5 + 11n`.
+
+- [ ] **M1-3** Delta compression + keyframes in `Snapshot`. Bitfield prefix per 32 entities; keyframe every 20 ticks.
+  *deps: M1-2 · Accept:* test — replay a recorded 200-tick sequence through delta encode/decode; reconstructed state equals full-snapshot state at every tick.
+
+- [ ] **M1-4** `core/sim/EntityState.luau` + `core/sim/Steering.luau` — entity struct, state enum, seek/separate/avoid.
+  *deps: M0-4 · Accept:* test — seek converges within N steps; separation prevents overlap for 20 co-located entities; avoidance turns away from a wall.
+
+- [ ] **M1-5** `core/net/History.luau` — ring buffer, `record`, `rewind(t, now)`.
+  *deps: M1-4 · Accept:* test — exact tick, interpolated between ticks, `nil` before window, clamped after now; capacity wraparound correct at 21 records.
+
+- [ ] **M1-6** `core/sim/DamageModel.luau` — damage, distance falloff, armor.
+  *deps: M0-4 · Accept:* test — falloff at min/max range boundaries; armor reduction; zero/negative damage rejected.
+
+- [ ] **M1-7** `server/services/TickService.luau` — accumulator loop at 20 Hz with per-phase `debug.profilebegin` timers and a p50/p95 tick-time gauge.
+  *deps: M0-2 · Accept:* Studio smoke — 600 ticks logged, mean interval within 50 ms ± 2 ms.
+
+- [ ] **M1-8** `server/services/EntityService.luau` — owns entity table, steps `core/sim` each tick, spawn/despawn.
+  *deps: M1-4, M1-7 · Accept:* Studio smoke — 40 entities spawn and move; no Instance created server-side for entity logic.
+
+- [ ] **M1-9** `server/services/ReplicationService.luau` — interest management (150 studs, top 32 by score), snapshot broadcast on `UnreliableRemoteEvent`.
+  *deps: M1-3, M1-8 · Accept:* Studio smoke — bytes/s/client logged and under 6 KB/s at 3 players + 40 entities.
+
+- [ ] **M1-10** `core/net/Interpolator.luau` — render-delay buffer, `sample(t)`, adaptive delay from jitter p95, 80 ms extrapolation cap.
+  *deps: M1-2 · Accept:* test — known sequence → expected samples; single dropped packet invisible; extrapolation stops at exactly 80 ms; out-of-order arrival dropped.
+
+- [ ] **M1-11** `client/controllers/EntityRenderer.luau` — instantiate/pool entity models, drive transforms from `Interpolator`.
+  *deps: M1-9, M1-10 · Accept:* Studio — two clients, entities move smoothly on both, no popping.
+
+- [ ] **M1-12** `server/services/CombatService.luau` — fire request validation pipeline, all 7 steps from [03-NETCODE §Lag compensation].
+  *deps: M1-5, M1-6, M1-8 · Accept:* test on the pure parts (rate bucket, origin tolerance, clamp math); Studio smoke — a fire request produces a hit event.
+
+- [ ] **M1-13** `client/controllers/PredictionController.luau` — predict tracer/flash/recoil/ammo/hitmarker, reconcile on authoritative result.
+  *deps: M1-12 · Accept:* Studio — mispredict counter present; forced server-reject removes the hitmarker but leaves the tracer.
+
+- [ ] **M1-14** `server/services/MovementGuard.luau` — speed/teleport/vertical checks with decaying violation score.
+  *deps: M1-7 · Accept:* test on the pure scoring function — single spike doesn't trigger, sustained violation does, score decays at 1.0/s.
+
+- [ ] **M1-15** `tools/loadtest/serialize.luau` — 10k snapshot encode/decode benchmark, reports ns/op and bytes.
+  *deps: M1-3 · Accept:* `lune run tools/loadtest/serialize.luau` prints a table; runs in under 10 s.
+
+- [ ] **M1-16** `tools/smoke/TickBench.luau` — spawn N entities, run 600 ticks, report p50/p95/p99 + per-phase.
+  *deps: M1-9 · Accept:* via MCP `execute_luau` at 60 entities — **p95 < 12 ms**. Quote the output in the commit.
+
+- [ ] **⚠ human M1-17** Two-client latency test. Studio, `NetworkSettings.IncomingReplicationLag` at 50/150/300 ms, shoot a moving Skitter, record hit-registration RTT at each.
+  *Accept:* hits register at all three; numbers recorded in `docs/metrics/m1.md`.
+
+---
+
+## M2 — Playable loop
+
+- [ ] **M2-1** `core/level/Assemble.luau` — seeded graph walk, connector matching, constraint check (pads reachable, no repeat within 2 hops, area ±15%).
+  *deps: M0-4 · Accept:* test — 1,000 seeds all produce valid layouts; same seed → identical layout; a deliberately broken module set fails loudly.
+
+- [ ] **M2-2** Room modules (12 for M2, 24 by M7) with tagged connector attachments.
+  *deps: M2-1 · Accept:* `validate-config` asserts every module has 2–4 tagged connectors with valid sizes.
+
+- [ ] **M2-3** Coarse waypoint nav graph built at assembly; entity pathing against it (not `PathfindingService`).
+  *deps: M2-1, M1-4 · Accept:* test — path exists between any two nodes in 1,000 generated layouts; path length within 1.4× euclidean.
+
+- [ ] **M2-4** Full enemy roster from `Enemies.luau`, behaviors wired to `Steering`.
+  *deps: M1-8, M2-3 · Accept:* Studio — one of each type spawns and exhibits its documented behavior.
+
+- [ ] **M2-5** Remaining three weapons. Slug as a server-simulated projectile entity; Arc as per-tick continuous validation.
+  *deps: M1-12 · Accept:* test — Arc ramp curve; Slug travel/drop math. Studio — all four fire and deal damage.
+
+- [ ] **M2-6** `LootService` — spawn tables by zone, pickup/drop, weight → speed multiplier, claim tokens.
+  *deps: M2-1 · Accept:* test — weight→speed table boundaries exact; claim token prevents double-pickup under simulated race.
+
+- [ ] **M2-7** `RunService_` — 12:00 timer, pad open schedule, extraction, death, individual extraction.
+  *deps: M2-6 · Accept:* Studio — full run completes; one player extracting doesn't end the run for others.
+
+- [ ] **M2-8** `core/sim/Budget.luau` + spawn director scaling formulas from [01 §Scaling].
+  *deps: M1-4 · Accept:* test — spend never exceeds budget; per-type caps respected; deterministic under fixed seed; headcount and time ramp match the formula exactly.
+
+- [ ] **M2-9** `core/director/Fsm.luau` — BUILD→PRESSURE→SPIKE→LULL with the pacing curve.
+  *deps: M2-8 · Accept:* test — every state reachable, no state ping-pongs within 3 ticks, output multiplier stays in `[0.6, 1.6]`.
+
+- [ ] **M2-10** HUD — timer, weight, HP, ammo, pad status.
+  *deps: M2-7 · Accept:* Studio — all fields update correctly during a run.
+
+- [ ] **⚠ human M2-11** Informal 3-player playtest. Record what's confusing, what's boring, what's broken.
+
+---
+
+## M3 — Telemetry & dashboard
+
+- [ ] **M3-1** `shared/net/Wire.luau` event envelope types + `TelemetryService` ring buffer with 200-event/5 s flush and drop counters.
+  *deps: M0-5 · Accept:* test on the pure buffer — overflow drops oldest and increments; flush triggers on both conditions.
+
+- [ ] **M3-2** Emit every event in the [04 §Event catalogue] from its owning service.
+  *deps: M3-1, M2-7 · Accept:* Studio — a full run produces at least one of each event type; assert in the smoke script.
+
+- [ ] **M3-3** Backend `/v1/ingest` — NDJSON, HMAC verify, per-line validation, partial-batch accept, `(run_id, server_id, seq)` dedupe.
+  *deps: M0-6 · Accept:* vitest — valid batch, malformed line rejected while siblings commit, replayed batch inserts zero rows, 10k lines < 500 ms.
+
+- [ ] **M3-4** Postgres migrations for all tables in [04 §Schema].
+  *deps: M0-6 · Accept:* `npm run migrate` up and down cleanly; `idem_key` uniqueness enforced by a test that attempts a duplicate.
+
+- [ ] **M3-5** Rollup worker — `run_summary`, `player_stats`, `loadout_pairs`.
+  *deps: M3-4 · Accept:* vitest — run three times over identical input, output byte-identical (idempotency).
+
+- [ ] **M3-6** `sim/` run simulator with the five archetypes.
+  *deps: M3-3 · Accept:* `npm --prefix sim run generate -- --runs 2000 --days 30` completes; ingest reports 2000 `run.end` rows.
+
+- [ ] **M3-7** Dashboard page at `/` — the charts listed in [04 §Dashboard].
+  *deps: M3-5, M3-6 · Accept:* loads with simulated data, every chart renders non-empty.
+
+- [ ] **M3-8** Failure drill: kill the backend mid-run, confirm gameplay continues and the drop counter appears in the next successful batch.
+  *deps: M3-2, M3-3 · Accept:* documented in `docs/metrics/m3.md` with the counter value.
+
+---
+
+## M4 — OVERSEER
+
+- [ ] **M4-1** `backend/src/llm/schema.ts` + `core/director/Schema.luau` from a shared `schema.json`. Sync test.
+  *deps: M0-6 · Accept:* vitest + lune both assert field names and enum members match `schema.json`.
+
+- [ ] **M4-2** System prompt `prompts/overseer.v1.md` — lore, whitelist with param semantics, voice, 4 worked examples (2 good, 2 bad).
+  *deps: M4-1 · Accept:* `countTokens` ≥ 4200 (cache eligibility on Haiku 4.5), asserted in a test.
+
+- [ ] **M4-3** `POST /v1/director/tick` — Haiku 4.5, `output_config.format`, `cache_control` on system, 1200 ms timeout, token logging.
+  *deps: M4-2 · Accept:* vitest with a mocked client — happy path, timeout, 429, malformed JSON, empty body all return a valid response shape.
+
+- [ ] **M4-4** `llm/fallback.ts` — balanced-brace JSON extraction from free text.
+  *deps: M4-3 · Accept:* vitest — extracts from prose-wrapped JSON, nested braces, JSON inside a code fence; returns null on genuinely unparseable input.
+
+- [ ] **M4-5** `core/director/Clamp.luau` — every rule in [05 §Clamping].
+  *deps: M4-1, M2-9 · Accept:* **test with ≥20 malformed inputs** (null, `{}`, wrong types, out-of-range, unknown enum, missing fields, extra fields, nested garbage, huge strings) — all return a valid `DirectorDecision`, none throw.
+
+- [ ] **M4-6** `DirectorService` — async tick, in-flight guard, circuit breaker (3 failures → 60 s open), apply at tick boundary.
+  *deps: M4-3, M4-5 · Accept:* Studio smoke — tick timing unaffected during a director call; unplug backend → FSM continues, breaker opens, recovers.
+
+- [ ] **M4-7** Bark filtering — `FilterStringAsync` + `GetNonChatStringForBroadcastAsync`, both pcall-wrapped, canned-bark pool (40 per intent).
+  *deps: M4-6 · Accept:* Studio smoke — force filter failure, assert a canned bark displays and no raw text reaches the UI.
+
+- [ ] **M4-8** Objective system — whitelist, cooldowns, param clamping, issue/complete events.
+  *deps: M4-5, M2-7 · Accept:* test — cooldown respected; params clamped per-objective; unknown ID keeps the active objective.
+
+- [ ] **M4-9** Comms HUD panel + threat-tier → lighting hook.
+  *deps: M4-7 · Accept:* Studio — barks appear, threat tier 5 visibly shifts the post stack.
+
+- [ ] **M4-10** A/B assignment by `hash(runId)`, arm recorded in `run.start`.
+  *deps: M4-6, M3-2 · Accept:* over 1,000 simulated runs, arm split within 48–52%.
+
+- [ ] **M4-11** Director metrics on the dashboard — latency, fallback rate, cost/run, A/B comparison.
+  *deps: M4-10, M3-7 · Accept:* charts render; fallback rate reads < 3% over 200 runs.
+
+---
+
+## M5 — Matchmaking & discovery
+
+- [ ] **M5-1** `core/discovery/Rating.luau` — Glicko-style update. *Accept:* test vs. hand-computed values; rd shrinks with play, grows with absence.
+- [ ] **M5-2** `core/discovery/Bucket.luau` — bucketing + widening schedule. *Accept:* test — boundaries exact, no player in two buckets, 75 s triggers undersized start.
+- [ ] **M5-3** Lobby place + queue UI. **⚠ human** to create the place. *Accept:* player can join/leave the queue.
+- [ ] **M5-4** MemoryStore queue (sorted map per bucket) + CAS removal. *Accept:* Studio — two coordinators cannot claim the same entry.
+- [ ] **M5-5** Lease-based coordinator election (10 s TTL). *Accept:* kill the holder, another takes over within 12 s; logged.
+- [ ] **M5-6** Squad formation + `ReserveServer` + `TeleportAsync`. *Accept:* Studio — 2 players queue, land in the same reserved server.
+- [ ] **M5-7** Backfill into in-progress runs (first 4 minutes). *Accept:* a queuer joins a running match.
+- [ ] **M5-8** `sim/matchmaking.ts` — Poisson arrivals, populations 5–500, wait percentiles + spread. *Accept:* report generated; p95 < 30 s at λ=1/s.
+- [ ] **M5-9** `core/discovery/Recommend.luau` — cosine + shrinkage (λ=10). *Accept:* test — shrinkage suppresses a 2-count pair; owned items excluded; cold start returns baseline.
+- [ ] **M5-10** Recommender worker + `/v1/recommend/loadout`. *Accept:* endpoint returns 3 items with reason codes for a known pid.
+- [ ] **M5-11** Offline eval script (time split, recall@3 vs popularity). *Accept:* `npm run eval:recommend` prints a comparison table; result recorded in `docs/metrics/m5.md` **whatever it says**.
+
+---
+
+## M6 — Economy
+
+- [ ] **M6-1** `core/economy/Ledger.luau` — apply, idempotency set, deterministic key construction. *Accept:* test — duplicate key no-op; balance = sum over 10k entries; negative balance rejected.
+- [ ] **M6-2** `DataService` write-behind queue (≤1 write/player/6 s, coalesced). *Accept:* test on the pure queue — coalescing correct, ordering preserved, flush on shutdown.
+- [ ] **M6-3** Faucets + sinks + insurance. *Accept:* Studio — each reason code produces a ledger entry with the right sign.
+- [ ] **M6-4** `core/economy/Controller.luau` — PI with all guardrails. *Accept:* test — converges from ±30%; daily cap; sample floor; clamps hold over 365 adversarial days.
+- [ ] **M6-5** Nightly economy worker + `/v1/config` with version guard and schema validation. *Accept:* out-of-range config rejected wholesale; older version ignored.
+- [ ] **M6-6** `EconomyService` config pull with compiled-in defaults. *Accept:* Studio — backend down at boot → defaults used, no error.
+- [ ] **M6-7** Reconciliation job. *Accept:* over 2,000 simulated runs, zero mismatches.
+- [ ] **M6-8** `core/economy/Market.luau` matching engine. *Accept:* test — price-time priority; partial fills; self-trade rejected; band rejected; **fuzz 100k orders conserves currency and items exactly**.
+- [ ] **M6-9** Escrow + order lifecycle + abuse caps. *Accept:* test — item cannot be in escrow and inventory simultaneously; cancel returns exact escrow.
+- [ ] **M6-10** Market UI. *Accept:* Studio — list, bid, fill, cancel all work.
+- [ ] **⚠ human M6-11** Deploy backend (Fly.io/Railway), set env, point the published place at it. *Accept:* published place reaches the deployed backend.
+
+---
+
+## M7 — Presentation & writeup
+
+- [ ] **M7-1** `core/anim/TwoBoneIk.luau`. *Accept:* test — reachable / exact / unreachable / degenerate; pole plane correct.
+- [ ] **M7-2** `core/anim/StepPlanner.luau`. *Accept:* test — opposing legs never lift together; step commits only past threshold; body height tracks foot mean.
+- [ ] **M7-3** Wire locomotion into `EntityRenderer` with the 4-tier LOD and a 24-raycast/frame cap. *Accept:* Studio — 40 entities, no popping at boundaries; raycast counter never exceeds 24.
+- [ ] **M7-4** Ragdoll pool (12), collision group, impulse from hit direction, 8 s recycle. *Accept:* Studio — kill 20 entities in 2 s, pool recycles, no error.
+- [ ] **M7-5** Zone lighting presets + 1.5 s transitions + threat-tier modulation. *Accept:* Studio — screenshots at each zone and at threat tier 1 vs 5.
+- [ ] **M7-6** Inverted-hull outlines; `tools/genhulls.ts` build step. *Accept:* hulls generated offline; enemies readable at 100 studs against busy geometry.
+- [ ] **M7-7** `LookController` `EditableImage` budget manager (8 cap, 2 reserved). *Accept:* Studio — 9th allocation refused cleanly, no error thrown.
+- [ ] **M7-8** Audio pass — weapons, impacts, OVERSEER comms VO treatment, zone ambience.
+- [ ] **M7-9** Remaining 12 room modules. *Accept:* `Assemble` still passes 1,000-seed validation.
+- [ ] **M7-10** Client frame profiling at 40 entities. *Accept:* per-subsystem numbers recorded in `docs/metrics/m7.md`, total within budget.
+- [ ] **⚠ human M7-11** Real playtest, 4+ players, full session. Record feedback.
+- [ ] **M7-12** Postmortem. **Write section 3 (what broke) incrementally from M1 onward — do not reconstruct it at the end.**
+- [ ] **M7-13** Demo video, 3–5 min: one run with the dashboard alongside.
+
+---
+
+## Running metrics log
+
+Create `docs/metrics/` at M1 and append per milestone. Every number in [11-INTERVIEW-ARTIFACTS §Numbers to have memorized] lands here as it's measured. Do not defer this — numbers captured late are numbers captured wrong.

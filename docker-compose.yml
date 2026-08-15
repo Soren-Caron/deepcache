@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: deepcache-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: deepcache
+      POSTGRES_PASSWORD: deepcache
+      POSTGRES_DB: deepcache
+    ports:
+      - "5432:5432"
+    volumes:
+      - deepcache-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U deepcache -d deepcache"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  deepcache-pgdata:

@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Studio-dependent checks (TickBench, two-client latency, ragdoll pooling) are
+# deliberately absent: they need a running Roblox Studio and are run locally
+# via the MCP bridge, with their output quoted in commit messages. Listing them
+# here would be a lie in the workflow file.
+
+jobs:
+  luau:
+    name: Luau (pure core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Installed from the pinned release rather than a third-party action, so
+      # CI depends only on the repo and GitHub itself.
+      - name: Install rokit
+        run: |
+          set -euo pipefail
+          ROKIT_VERSION=1.2.0
+          curl -fsSL -o /tmp/rokit.zip \
+            "https://github.com/rojo-rbx/rokit/releases/download/v${ROKIT_VERSION}/rokit-${ROKIT_VERSION}-linux-x86_64.zip"
+          unzip -q -o /tmp/rokit.zip -d /tmp/rokit
+          /tmp/rokit/rokit self-install
+          echo "$HOME/.rokit/bin" >> "$GITHUB_PATH"
+
+      - name: Install pinned tools
+        run: |
+          set -euo pipefail
+          rokit trust rojo-rbx/rojo
+          rokit trust lune-org/lune
+          rokit install --no-trust-check
+
+      - name: Encoding check (no UTF-8 BOMs)
+        run: lune run tools/check-encoding
+
+      - name: Config validation
+        run: lune run tools/validate-config
+
+      - name: Test framework selftest
+        run: lune run tools/selftest
+
+      - name: Unit tests
+        run: lune run tests
+
+      - name: Rojo build
+        run: rojo build -o /tmp/deepcache.rbxl
+
+      - name: Upload place file
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepcache-place
+          path: /tmp/deepcache.rbxl
+          retention-days: 7
+
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build

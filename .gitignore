@@ -1,0 +1,29 @@
+# Build output
+*.rbxl
+*.rbxlx
+*.rbxm
+*.rbxmx
+/build/
+/tmp/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Env / secrets — never commit
+.env
+.env.local
+*.pem
+
+# Local data
+/data/
+*.sqlite
+
+# Editor
+.DS_Store
+Thumbs.db
+.vscode/settings.json
+.idea/
+
+# Rokit installs tools to ~/.rokit, nothing local to ignore

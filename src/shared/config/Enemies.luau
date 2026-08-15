@@ -1,0 +1,38 @@
+--!strict
+--[[ Pure data. `budget` is the currency the director spends. See docs/01. ]]
+
+return {
+	Skitter = {
+		hp = 45, speed = 22, dmg = 8, atkRange = 4, atkCooldown = 0.8,
+		budget = 1, hitboxRadius = 1.6, behavior = "SwarmNearest",
+		zones = { "Perimeter", "Processing", "Vault" }, capPerWave = 24,
+	},
+	Sentry = {
+		hp = 130, speed = 0, dmg = 11, atkRange = 45, atkCooldown = 0.35,
+		budget = 2, hitboxRadius = 2.2, behavior = "Static",
+		zones = { "Perimeter", "Processing", "Vault" }, capPerWave = 6,
+	},
+	Hauler = {
+		hp = 420, speed = 8, dmg = 30, atkRange = 6, atkCooldown = 1.6,
+		budget = 5, hitboxRadius = 3.4, behavior = "PushObjective",
+		zones = { "Processing", "Vault" }, capPerWave = 4,
+	},
+	Lancer = {
+		hp = 90, speed = 12, dmg = 14, atkRange = 55, atkCooldown = 1.2,
+		budget = 3, hitboxRadius = 2.0, behavior = "KeepDistance",
+		projectile = "Slug", preferredDistance = 40,
+		zones = { "Processing", "Vault" }, capPerWave = 8,
+	},
+	Warden = {
+		hp = 700, speed = 10, dmg = 22, atkRange = 8, atkCooldown = 1.4,
+		budget = 9, hitboxRadius = 4.0, behavior = "ShieldNearby",
+		shieldRadius = 30, shieldReduction = 0.5,
+		zones = { "Vault" }, capPerWave = 2,
+	},
+	Reclaimer = {
+		hp = 550, speed = 16, dmg = 26, atkRange = 6, atkCooldown = 1.0,
+		budget = 8, hitboxRadius = 3.0, behavior = "HuntHeaviest",
+		zones = { "Perimeter", "Processing", "Vault" }, capPerWave = 2,
+		directorOnly = true, -- never spawned by the baseline budget planner
+	},
+}
