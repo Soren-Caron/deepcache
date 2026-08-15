@@ -35,6 +35,18 @@ local COLORS: { [string]: Color3 } = {
 local interp = Interpolator.new()
 local origin: Types.Vec3 = { x = 0, y = 0, z = 0 }
 
+--- Raw authoritative state as of the last packet, mirroring the server's
+--- per-client baseline. Kept separate from the interpolation buffer on purpose:
+--- deltas must be applied to what the server actually sent, never to an
+--- interpolated or extrapolated sample. An earlier version rebuilt the baseline
+--- by sampling the interpolator at `now`, which extrapolates up to 80ms past
+--- the newest frame — and because each packet then re-extrapolated from the
+--- previous extrapolation, the error compounded until entities raced ahead of
+--- their true position and stuck there. Static targets hid it completely
+--- (zero velocity makes extrapolation a no-op), so it only appeared against a
+--- moving one.
+local baseline: { Types.EntityView } = {}
+
 local folder: Folder? = nil
 local active: { [number]: BasePart } = {}
 local pool: { BasePart } = {}
@@ -45,6 +57,8 @@ local stats = {
 	bytesReceived = 0,
 	extrapolatedFrames = 0,
 	renderedFrames = 0,
+	decodeErrors = 0,
+	rejectedFrames = 0,
 }
 
 local function container(): Folder
@@ -110,33 +124,22 @@ local function onSnapshot(packet: buffer)
 	Interpolator.observeArrival(interp, now)
 
 	local ok, decoded = pcall(function()
-		-- A keyframe replaces the world; a delta merges onto what we hold.
+		-- A keyframe replaces the world; a delta merges onto the raw baseline.
 		local peek = Snapshot.decode(packet, origin)
 		if peek.isKeyframe then
 			return peek
-		end
-		local baseline: { Types.EntityView } = {}
-		for _, id in Interpolator.knownIds(interp) do
-			local sample = Interpolator.sample(interp, id, now)
-			if sample then
-				baseline[#baseline + 1] = {
-					id = id,
-					pos = sample.pos,
-					yaw = sample.yaw,
-					state = sample.state,
-					hpPct = 1,
-				}
-			end
 		end
 		return Snapshot.applyDelta(baseline, packet, origin)
 	end)
 
 	if not ok then
 		-- A corrupt packet is a dropped packet, not a crashed client.
+		stats.decodeErrors += 1
 		return
 	end
 
-	Interpolator.push(interp, now, (decoded :: Snapshot.Snapshot).entities)
+	baseline = (decoded :: Snapshot.Snapshot).entities
+	Interpolator.push(interp, now, baseline)
 
 	-- Retune render delay from observed jitter roughly once a second.
 	if stats.snapshotsReceived % 20 == 0 then

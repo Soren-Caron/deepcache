@@ -289,6 +289,65 @@ t.describe("net/Snapshot delta compression", function()
 		expect(deltaBytes < keyframeBytes / 2).toBeTruthy()
 	end)
 
+	t.it("client reconstruction tracks a moving entity when fed the raw baseline", function()
+		-- Mirrors EntityRenderer's receive loop. The invariant: the baseline
+		-- for the next delta must be the output of the previous one, i.e. the
+		-- raw authoritative state.
+		local truth = { view(1, 0, 0, 0) }
+		local baseline: { Types.EntityView } = {}
+
+		for tick = 0, 99 do
+			truth[1].pos = Types.vec3(tick * 0.8, 0, tick * 0.4)
+
+			if Snapshot.isKeyframeTick(tick) then
+				baseline = Snapshot.decode(Snapshot.encode(tick, truth, ORIGIN), ORIGIN).entities
+			else
+				baseline = Snapshot.applyDelta(baseline, Snapshot.encodeDelta(tick, truth, baseline, ORIGIN), ORIGIN).entities
+			end
+
+			-- Must stay pinned to truth, never drift.
+			expect(baseline[1].pos.x).approx(truth[1].pos.x, Quantize.POSITION_MAX_ERROR + 1e-9)
+			expect(baseline[1].pos.z).approx(truth[1].pos.z, Quantize.POSITION_MAX_ERROR + 1e-9)
+		end
+	end)
+
+	t.it("a delta is only valid against the exact baseline it was encoded from", function()
+		-- The invariant the client must respect. A delta carries only the
+		-- entities whose quantized record changed, so anything the encoder
+		-- considered unchanged is never transmitted — and a receiver holding a
+		-- different baseline has no way to learn the difference until the next
+		-- keyframe.
+		--
+		-- This is what an earlier EntityRenderer got wrong: it rebuilt the
+		-- baseline each packet by sampling its interpolator, which extrapolates
+		-- past the newest frame, so it applied deltas to a baseline the server
+		-- never had. A static target hid it completely, since extrapolating
+		-- zero velocity is a no-op.
+		local serverTruth = { view(1, 10, 0, 0), view(2, 50, 0, 0) }
+		local serverBaseline = Snapshot.decode(Snapshot.encode(0, serverTruth, ORIGIN), ORIGIN).entities
+
+		-- Entity 1 moves; entity 2 holds still, so only entity 1 is carried.
+		serverTruth[1].pos = Types.vec3(12, 0, 0)
+		local delta = Snapshot.encodeDelta(1, serverTruth, serverBaseline, ORIGIN)
+		expect(#Snapshot.decode(delta, ORIGIN).entities).toEqual(1)
+
+		-- Correct baseline: both entities end up right.
+		local correct = Snapshot.applyDelta(serverBaseline, delta, ORIGIN).entities
+		expect(correct[1].pos.x).approx(12, Quantize.POSITION_MAX_ERROR + 1e-9)
+		expect(correct[2].pos.x).approx(50, Quantize.POSITION_MAX_ERROR + 1e-9)
+
+		-- Wrong baseline: entity 1 is corrected because it was transmitted,
+		-- but entity 2's error survives untouched.
+		local drifted = {
+			{ id = 1, pos = Types.vec3(99, 0, 0), yaw = 0, state = "move" :: Types.EntityStateName, hpPct = 1 },
+			{ id = 2, pos = Types.vec3(77, 0, 0), yaw = 0, state = "move" :: Types.EntityStateName, hpPct = 1 },
+		}
+		local wrong = Snapshot.applyDelta(drifted, delta, ORIGIN).entities
+		expect(wrong[1].pos.x).approx(12, Quantize.POSITION_MAX_ERROR + 1e-9)
+		expect(wrong[2].pos.x).approx(77, 1e-9)
+		expect(math.abs(wrong[2].pos.x - serverTruth[2].pos.x) > 20).toBeTruthy()
+	end)
+
 	t.it("marks keyframes and deltas distinguishably", function()
 		expect(Snapshot.decode(Snapshot.encode(1, {}, ORIGIN), ORIGIN).isKeyframe).toBeTruthy()
 		expect(Snapshot.decode(Snapshot.encodeDelta(1, {}, {}, ORIGIN), ORIGIN).isKeyframe).toBeFalsy()

@@ -149,8 +149,15 @@ Additional pure-core modules extracted so the adapters stay thin, all tested:
 - [ ] **M1-16** `tools/smoke/TickBench.luau` — spawn N entities, run 600 ticks, report p50/p95/p99 + per-phase.
   *deps: M1-9 · Accept:* via MCP `execute_luau` at 60 entities — **p95 < 12 ms**. Quote the output in the commit.
 
-- [ ] **⚠ human M1-17** Two-client latency test. Studio, `NetworkSettings.IncomingReplicationLag` at 50/150/300 ms, shoot a moving Skitter, record hit-registration RTT at each.
-  *Accept:* hits register at all three; numbers recorded in `docs/metrics/m1.md`.
+- [x] **M1-17a** Injected-latency test (single client, driven through the MCP bridge).
+  *Verified:* 6/6 hits on a **moving** target at 0, 150, and 300 ms. At 300 ms the server rewinds exactly 250 ms (`LAGCOMP_WINDOW`) and clamps every shot — the documented design bounding how far a high-ping player may shoot around a corner.
+  **Caveat recorded:** a Hauler moves 3.2 studs in 400 ms against a 3.4-stud hitbox, so hit rate alone cannot separate "compensation worked" from "forgiving hitbox". The rewind-age and clamp counters are the real evidence. A sharper test (fast/small target plus a no-compensation control) is queued for M2.
+  **Found while measuring:** ammo exhaustion masquerading as latency failure (added a `reload` diagnostic), and a misleading `rewindClamped` trace field sourced from the wrong layer.
+
+- [x] **M1-18** *(added)* Client reconstruction fix.
+  `EntityRenderer` rebuilt its delta baseline by sampling the interpolator, which extrapolates past the newest frame — so deltas were applied to a baseline the server never had, and rendered entities froze at positions they had not reached. **Every prior combat test used a static target, which hid it entirely** (extrapolating zero velocity is a no-op). Fixed to keep the raw authoritative state; two regression tests added.
+
+- [ ] **⚠ human M1-17b** Two-client test — two players in one session, both seeing smooth entity motion and correct hit registration. Needs a second person.
 
 ---
 

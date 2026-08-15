@@ -95,6 +95,29 @@ local function main()
 		return { died = died, corpseTicks = EntityState.CORPSE_TICKS, timeline = timeline }
 	end)
 
+	Diagnostics.register("reload", function(weaponId: string?)
+		local id = weaponId or "Sidearm"
+		for _, player in Players:GetPlayers() do
+			CombatService.reload(player, id)
+		end
+		return `reloaded {id} for {#Players:GetPlayers()} player(s)`
+	end)
+
+	Diagnostics.register("entityDump", function()
+		local rows = {}
+		for _, view in EntityService.views() do
+			local e = EntityService.get(view.id)
+			if e then
+				table.insert(rows, string.format(
+					"id=%d kind=%s state=%s hp=%.0f/%.0f pos=(%.1f,%.1f,%.1f) vel=(%.2f,%.2f,%.2f)",
+					e.id, e.kind, e.state, e.hp, e.maxHp,
+					e.pos.x, e.pos.y, e.pos.z, e.vel.x, e.vel.y, e.vel.z
+				))
+			end
+		end
+		return rows
+	end)
+
 	Diagnostics.register("historyDump", function()
 		local History = require(Shared.core.net.History)
 		local h = EntityService.getHistory()

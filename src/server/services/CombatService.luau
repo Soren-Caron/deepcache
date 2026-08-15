@@ -249,7 +249,10 @@ local function resolve(player: Player, request: Wire.FireRequest, now: number)
 	local trace: Trace = {
 		seq = request.seq,
 		rewindAgeMs = (now - (if rewound then rewound.actualTime else now)) * 1000,
-		rewindClamped = if rewound then rewound.clamped else false,
+		-- Report the *effective* clamp from clampFireTime, not History's.
+		-- History receives an already-clamped time, so its own flag is always
+		-- false and reads as "no clamping happened" when the opposite is true.
+		rewindClamped = clamped,
 		candidates = #candidates,
 		withRadius = withRadius,
 		wallDistance = wallDistance,
