@@ -185,8 +185,23 @@ Additional pure-core modules extracted so the adapters stay thin, all tested:
   **Found while measuring — levels are trees.** 17 connections for 18 modules, no loops, so every route backtracks. Free loop closure was implemented, measured at **0 loops across 300 layouts** (face-midpoint connectors almost never leave two unused doors coincident), and removed rather than kept as decoration. Real loops need placement steered to mate against two doors at once, which changes level topology — a design call, flagged in docs/01 rather than built.
   *Remaining for the adapter:* entities following these routes lands with M2-4.
 
-- [ ] **M2-4** Full enemy roster from `Enemies.luau`, behaviors wired to `Steering`.
-  *deps: M1-8, M2-3 · Accept:* Studio — one of each type spawns and exhibits its documented behavior.
+- [x] **M2-4** Full enemy roster from `Enemies.luau`, behaviors wired to `Steering`.
+  *Verified in Studio* — one of each spawned in a ring at 70 studs, live tick loop, 5 s:
+
+  ```
+  Skitter   SwarmNearest  state=attack dist 70.0 ->  4.0 (-66.0)  shielded=true
+  Sentry    Static        state=idle   dist 70.0 -> 70.0  (+0.0)
+  Hauler    PushObjective state=move   dist 70.0 -> 29.6 (-40.4)  speed=8.0
+  Lancer    KeepDistance  state=attack dist 70.0 -> 54.7 (-15.3)
+  Warden    ShieldNearby  state=move   dist 70.0 -> 22.4 (-47.6)  speed=10.0
+  Reclaimer HuntHeaviest  state=move   dist 70.0 -> 60.9  (-9.1)  speed=16.0
+  ```
+
+  Each matches its row: the Sentry never moves (area denial, must be flanked), the Lancer stops at 54.7 and attacks from range rather than closing, the Hauler lumbers at 8, and `shielded=true` on the Skitter is the Warden actively protecting it.
+  **Nav pathing (closes out M2-3's adapter half):** a Skitter spawned in `Vault_Core` — module 9, hop 8, **414 studs away** — closed **290 studs in 14 s at full speed with 0 stalled samples**, routing through eight rooms of doorways. Steering alone would have pressed it into the first wall; the probe reports the per-second trace precisely so "stuck on geometry" and "walking the long way round" cannot be confused.
+  **Added — routes are cached and recomputed on room transition,** not per tick and not on a timer. A stale route is only wrong once an endpoint changes room, so that is exactly when it is rebuilt: a few A* calls per second across the whole population.
+  **Added — `Warden` shields are queried at the moment damage lands** (`EntityService.damageMultiplierFor`), not cached, so a Warden dying mid-fight stops protecting its escort on the same tick. Shields do not stack.
+  **Added — `HuntHeaviest` reads carried weight** through the target provider, falling back to nearest before anyone is carrying anything.
 
 - [ ] **M2-5** Remaining three weapons. Slug as a server-simulated projectile entity; Arc as per-tick continuous validation.
   *deps: M1-12 · Accept:* test — Arc ramp curve; Slug travel/drop math. Studio — all four fire and deal damage.

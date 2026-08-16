@@ -30,8 +30,13 @@ local MovementGuardService = require("./services/MovementGuardService")
 local Diagnostics = require("./services/Diagnostics")
 local TickBench = require("./smoke/TickBench")
 
-local function playerTargets(): { { id: number, pos: Types.Vec3 } }
-	local out: { { id: number, pos: Types.Vec3 } } = {}
+--- Carried weight per player, which HuntHeaviest reads. LootService owns this
+--- once M2-6's adapter lands; until then it is set by the roster probe so the
+--- Reclaimer's targeting can be verified without a full loot pipeline.
+local carriedWeight: { [number]: number } = {}
+
+local function playerTargets(): { EntityService.Target }
+	local out: { EntityService.Target } = {}
 	for _, player in Players:GetPlayers() do
 		local character = player.Character
 		local root = character and character:FindFirstChild("HumanoidRootPart")
@@ -41,6 +46,7 @@ local function playerTargets(): { { id: number, pos: Types.Vec3 } }
 				table.insert(out, {
 					id = player.UserId,
 					pos = { x = root.Position.X, y = root.Position.Y, z = root.Position.Z },
+					weight = carriedWeight[player.UserId] or 0,
 				})
 			end
 		end
@@ -149,6 +155,123 @@ local function main()
 	Diagnostics.register("clearLevel", function()
 		LevelService.clear()
 		return "level cleared, scaffolding restored"
+	end)
+
+	-- M2-4 acceptance: one of each enemy spawns and does what its row in
+	-- Enemies.luau says. Spawns them in a ring around the player, steps the
+	-- live tick loop, and reports how each one moved — a Sentry that walked or
+	-- a Lancer that closed to melee shows up as a number here.
+	Diagnostics.register("rosterProbe", function(seconds: number?)
+		local player = Players:GetPlayers()[1]
+		if player == nil or player.Character == nil then
+			return { error = "no player in the session" }
+		end
+		local root = player.Character:FindFirstChild("HumanoidRootPart") :: BasePart
+		local origin = { x = root.Position.X, y = root.Position.Y, z = root.Position.Z }
+
+		-- Give the player a carry so HuntHeaviest has something to prefer.
+		carriedWeight[player.UserId] = 60
+
+		local kinds = { "Skitter", "Sentry", "Hauler", "Lancer", "Warden", "Reclaimer" }
+		local spawned: { [string]: Types.Entity } = {}
+		local startDistance: { [string]: number } = {}
+		local tick = TickService.getTick()
+		for index, kind in kinds do
+			local angle = (index / #kinds) * math.pi * 2
+			local at = { x = origin.x + math.cos(angle) * 70, y = origin.y, z = origin.z + math.sin(angle) * 70 }
+			spawned[kind] = EntityService.spawn(kind :: any, at, tick)
+			startDistance[kind] = Types.distance(at, origin)
+		end
+
+		task.wait(seconds or 4)
+
+		local rows: { string } = {}
+		for _, kind in kinds do
+			local entity = EntityService.get(spawned[kind].id)
+			if entity == nil then
+				table.insert(rows, `{kind}: despawned`)
+				continue
+			end
+			local now = Types.distance(entity.pos, origin)
+			local config = (require(Shared.config.Enemies) :: any)[kind]
+			table.insert(rows, string.format(
+				"%-9s %-13s state=%-6s dist %6.1f -> %6.1f (%+.1f)  speed=%.1f  shielded=%s",
+				kind, config.behavior, entity.state, startDistance[kind], now,
+				now - startDistance[kind], Types.magnitude(entity.vel),
+				tostring(EntityService.isShielded(entity))
+			))
+		end
+
+		carriedWeight[player.UserId] = 0
+		for _, kind in kinds do
+			EntityService.remove(spawned[kind].id)
+		end
+		return rows
+	end)
+
+	-- M2-3/M2-4: an entity spawned rooms away must route to the player through
+	-- doorways rather than pressing into the wall between them. Reports the
+	-- distance trace, so "stuck against geometry" and "walking the long way
+	-- round" are distinguishable rather than both reading as slow.
+	Diagnostics.register("navProbe", function(moduleIndex: number?, samples: number?)
+		local player = Players:GetPlayers()[1]
+		if player == nil or player.Character == nil then
+			return { error = "no player in the session" }
+		end
+		local layout = LevelService.getLayout()
+		if layout == nil then
+			return { error = "no level built" }
+		end
+		local root = player.Character:FindFirstChild("HumanoidRootPart") :: BasePart
+
+		-- Default to the deepest module: the longest possible route.
+		local index = moduleIndex or layout.pads[#layout.pads].moduleIndex
+		local module_ = layout.modules[index]
+		local at = { x = module_.at.x, y = root.Position.Y, z = module_.at.z }
+
+		local entity = EntityService.spawn("Skitter", at, TickService.getTick())
+		local trace: { string } = {}
+		local previous = Types.distance(entity.pos, {
+			x = root.Position.X, y = root.Position.Y, z = root.Position.Z,
+		})
+		local startDistance = previous
+		local stalled = 0
+
+		for sample = 1, samples or 10 do
+			task.wait(1)
+			local live = EntityService.get(entity.id)
+			if live == nil then
+				break
+			end
+			local target = { x = root.Position.X, y = root.Position.Y, z = root.Position.Z }
+			local distance = Types.distance(live.pos, target)
+			local progress = previous - distance
+			if progress < 1 then
+				stalled += 1
+			end
+			table.insert(trace, string.format("t=%2ds dist=%6.1f  moved %+5.1f  speed=%4.1f",
+				sample, distance, progress, Types.magnitude(live.vel)))
+			previous = distance
+		end
+
+		EntityService.remove(entity.id)
+		return {
+			startedFrom = `{module_.id} (module {index}, {module_.zone}, hop {module_.hop})`,
+			startDistance = math.floor(startDistance),
+			endDistance = math.floor(previous),
+			closed = math.floor(startDistance - previous),
+			stalledSamples = stalled,
+			trace = trace,
+		}
+	end)
+
+	Diagnostics.register("setCarriedWeight", function(weight: number)
+		local player = Players:GetPlayers()[1]
+		if player == nil then
+			return "no player"
+		end
+		carriedWeight[player.UserId] = weight
+		return `carried weight for {player.Name} set to {weight}`
 	end)
 
 	Diagnostics.register("movementMetrics", MovementGuardService.getMetrics)
