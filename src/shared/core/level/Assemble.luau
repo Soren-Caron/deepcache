@@ -744,7 +744,12 @@ local function attempt(
 	local spineLength = plannedTotal - branchCount
 	local bands = makeBands(spineLength)
 
-	-- One pad per band, at a random index inside it.
+	-- One pad per band, at a random index inside it, never on the entrance.
+	--
+	-- Module 1 is where players drop. A pad there means the 3:00 extraction is
+	-- underfoot from the moment the run starts, which removes the travel the
+	-- whole risk/reward loop is built on. Caught in Studio, where the pad
+	-- report read "Perimeter: 0 studs, 1 hops".
 	local padAtIndex: { [number]: boolean } = {}
 	for _, zone in ZONE_ORDER do
 		local first: number?, last: number? = nil, nil
@@ -755,7 +760,7 @@ local function attempt(
 			end
 		end
 		if first and last then
-			padAtIndex[Rng.nextRange(rng, first, last)] = true
+			padAtIndex[Rng.nextRange(rng, math.max(first, 2), last)] = true
 		end
 	end
 

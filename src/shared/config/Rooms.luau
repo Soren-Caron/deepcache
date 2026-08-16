@@ -23,6 +23,28 @@ return {
 	--- Doorway widths in studs, for the Studio geometry pass.
 	connectorWidths = { small = 8, large = 16 },
 
+	--- Seed used when nothing else picks one. M2-7 will draw a per-run seed and
+	--- log it, so a reported run can be rebuilt exactly.
+	defaultSeed = 1,
+
+	--- Geometry for the instantiation pass (server/services/LevelService).
+	---
+	--- Walls are built *inside* each module's footprint. Two connected modules
+	--- each own the wall on their shared face, and building them on the shared
+	--- plane would put two parts in the same place — z-fighting plus double the
+	--- part count. Insetting by the wall thickness makes them touch instead.
+	geometry = {
+		wallHeight = 24,
+		wallThickness = 2,
+		doorwayHeight = 14,
+		floorThickness = 2,
+		--- How far spawn points keep off the walls, so nothing spawns inside
+		--- one or blocks a doorway.
+		spawnInset = 12,
+		--- Roughly one spawn point per this much floor area.
+		studsPerSpawnPoint = 900,
+	},
+
 	modules = {
 		-- Connective tissue. Available in every zone, which is what gives each
 		-- band enough distinct modules to satisfy the no-repeat-within-2-hops

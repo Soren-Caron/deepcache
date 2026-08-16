@@ -178,6 +178,11 @@ t.describe("Assemble.generate", function()
 				expect(dist[index] >= 0).toBeTruthy()
 			end
 			expect(#layout.pads).toEqual(3)
+			-- Never on the entrance: a pad underfoot at the drop point removes
+			-- the travel the risk/reward loop is built on.
+			for _, pad in layout.pads do
+				expect(pad.moduleIndex).never().toEqual(1)
+			end
 			-- Ordered Perimeter -> Processing -> Vault, which is the order the
 			-- pads open in, so consumers can index by depth.
 			expect(layout.pads[1].zone).toEqual("Perimeter")

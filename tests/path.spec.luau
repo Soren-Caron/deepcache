@@ -325,6 +325,42 @@ t.describe("Path.nearestWaypoint", function()
 	end)
 end)
 
+t.describe("Path to the extraction pads", function()
+	t.it("makes every pad a real journey from the drop point", function()
+		-- Zero-distance extraction is the failure this guards: a pad on the
+		-- entrance module means the 3:00 extraction is underfoot at t=0.
+		for seed = 1, 200 do
+			local layout = Assemble.generate(seed, CATALOGUE, TARGET)
+			for _, pad in layout.pads do
+				local route = Path.find(layout, 1, pad.moduleIndex) :: { number }
+				expect(route).never().toBeNil()
+				expect(#route >= 3).toBeTruthy() -- room, doorway, room at minimum
+				expect(Path.length(layout, route) > 0).toBeTruthy()
+			end
+		end
+	end)
+
+	t.it("puts the deeper pads further away, which is what makes them pay more", function()
+		local wins, total = 0, 0
+		for seed = 1, 200 do
+			local layout = Assemble.generate(seed, CATALOGUE, TARGET)
+			local byZone: { [string]: number } = {}
+			for _, pad in layout.pads do
+				local route = Path.find(layout, 1, pad.moduleIndex) :: { number }
+				byZone[pad.zone] = Path.length(layout, route)
+			end
+			total += 1
+			if byZone.Perimeter < byZone.Processing and byZone.Processing < byZone.Vault then
+				wins += 1
+			end
+		end
+		-- Not universal: a branch can hang a Vault room back near the spine.
+		-- The ordering should hold in the large majority, which is what makes
+		-- the pad-open schedule mean anything.
+		expect(wins / total > 0.85).toBeTruthy()
+	end)
+end)
+
 t.describe("Path.route", function()
 	local layout = Assemble.generate(13, CATALOGUE, TARGET)
 

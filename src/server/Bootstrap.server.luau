@@ -17,10 +17,12 @@ local Players = game:GetService("Players")
 local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 
 local Branding = require(Shared.config.Branding)
+local Rooms = require(Shared.config.Rooms)
 local Types = require(Shared.core.Types)
 local Remotes = require(Shared.net.Remotes)
 
 local TickService = require("./services/TickService")
+local LevelService = require("./services/LevelService")
 local EntityService = require("./services/EntityService")
 local ReplicationService = require("./services/ReplicationService")
 local CombatService = require("./services/CombatService")
@@ -48,6 +50,11 @@ end
 
 local function main()
 	Remotes.init()
+
+	-- The level exists before anything that spawns into it. M2-7 takes over
+	-- seed selection when the run lifecycle lands; until then every boot builds
+	-- the same level, which is what makes a Studio session repeatable.
+	local layout = LevelService.build(Rooms.defaultSeed)
 
 	ReplicationService.init()
 	CombatService.init()
@@ -132,6 +139,18 @@ local function main()
 		end
 		return { frameCount = History.frameCount(h), oldestMs = (now - (History.oldestTime(h) or now)) * 1000, rows = rows }
 	end)
+	-- Level. `buildLevel` takes a seed so a layout seen in a report can be
+	-- reproduced in the world; M2-7 will own per-run seed selection.
+	Diagnostics.register("buildLevel", function(seed: number?)
+		LevelService.build(seed or Rooms.defaultSeed)
+		return LevelService.describe()
+	end)
+	Diagnostics.register("levelInfo", LevelService.describe)
+	Diagnostics.register("clearLevel", function()
+		LevelService.clear()
+		return "level cleared, scaffolding restored"
+	end)
+
 	Diagnostics.register("movementMetrics", MovementGuardService.getMetrics)
 	Diagnostics.register("bandwidth", ReplicationService.sampleBandwidth)
 	Diagnostics.register("bench", TickBench.run)
@@ -154,6 +173,10 @@ local function main()
 	TickService.start()
 
 	print(`[{Branding.gameName}] server up — tick {1 / 20}s, phases: sim/history/combat/movement/replication`)
+	print(
+		`[{Branding.gameName}] level seed {layout.seed} — {#layout.modules} modules `
+			.. `({layout.spineCount} spine + {layout.branchCount} branches), {layout.totalArea} studs^2`
+	)
 	print(`[{Branding.gameName}] diagnostics: {table.concat(Diagnostics.commands(), ", ")}`)
 end
 
