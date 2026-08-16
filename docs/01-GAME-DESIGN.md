@@ -35,10 +35,20 @@ LOBBY ──► DROP ──────────────► RUN (12:00) �
 
 Not fully procedural terrain — **procedurally assembled from hand-authored room modules**, which gives variety without the art cost or the pathfinding pathologies of noise-generated space.
 
-- ~24 authored modules, each a sealed box with 2–4 tagged connector faces (`N/S/E/W`, `size: small|large`).
+- ~24 authored modules (12 at M2), each a sealed box with 2–4 tagged connector faces (`N/S/E/W`, `size: small|large`). Catalogue: `src/shared/config/Rooms.luau`.
 - Assembly: seeded graph walk places a spine of 8–12 modules, then branches 4–6 dead-end rooms off it. Seed is per-run and logged, so any run is reproducible for debugging.
 - Constraint solver guarantees: all three extraction pads reachable, no module repeated within 2 hops, total floor area within ±15% of target.
 - Nav: baked `PathfindingModifier` volumes per module, stitched at connectors. Entities path on a coarse waypoint graph built at assembly time, not on Roblox `PathfindingService` per-entity (too slow at 40+ entities).
+
+**As built (M2-1, `core/level/Assemble.luau`).** Five things the spec did not pin down, settled by making it run:
+
+- **At most one connector per face.** The generator identifies a module's mating door by face alone; two connectors on one face would make that ambiguous. Enforced in `validate-config`.
+- **A module lists *zones*, not a zone.** Corridors and junctions serve all three bands. With one zone each, every band would need four dedicated rooms just to satisfy the no-repeat-within-2-hops rule — 12 rooms of pure connective tissue before a single interesting one. Mirrors how `Enemies.zones` already works.
+- **Spine and branch counts are searched, not drawn.** The spec asks for both a count in a fixed range and area within ±15%. Module areas span 1024–10752 studs², so counts drawn independently miss the area window on ~13% of seeds. The walk measures the area it actually achieves on its first pass and recomputes the count from that, which satisfies both constraints without a tuning constant. Counts still land in the documented 8–12 / 4–6 ranges.
+- **Exactly one pad per zone**, at a random index inside that zone's band. "All three pads reachable" is checked by BFS from the entrance over every module, not just the pads.
+- **Connectors sit at face midpoints**, which is what makes joined doorways coincide with no per-module offset table. This is now an authoring constraint on the Studio geometry: a doorway off-centre on its face will line up in the layout maths and visibly not in the level.
+
+Area is derived as `width * depth` rather than authored, so the two cannot drift.
 
 **Zones.** Three depth bands (Perimeter / Processing / Vault). Deeper = better loot, more enemies, worse lighting, and the extraction pad that opens later.
 

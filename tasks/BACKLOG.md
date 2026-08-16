@@ -163,11 +163,17 @@ Additional pure-core modules extracted so the adapters stay thin, all tested:
 
 ## M2 — Playable loop
 
-- [ ] **M2-1** `core/level/Assemble.luau` — seeded graph walk, connector matching, constraint check (pads reachable, no repeat within 2 hops, area ±15%).
-  *deps: M0-4 · Accept:* test — 1,000 seeds all produce valid layouts; same seed → identical layout; a deliberately broken module set fails loudly.
+- [x] **M2-1** `core/level/Assemble.luau` — seeded graph walk, connector matching, constraint check (pads reachable, no repeat within 2 hops, area ±15%).
+  *Verified:* **1,000/1,000 seeds valid**; same seed reproduces the layout exactly; 11 broken-catalogue mutations each fail with a named reason, against an unmutated control that passes. Constraints are re-derived from the placed geometry in the spec rather than read back from the generator, and 9 corruption tests prove `validate` rejects what it claims to check. Numbers in [docs/metrics/m2.md](../docs/metrics/m2.md).
+  **Divergence — module count is searched, not drawn.** The spec's two constraints (counts in fixed ranges, area within ±15%) are not independent: module areas span 1024–10752 studs², so a blindly drawn count misses the area window on ~13% of seeds. The walk now measures its own achieved mean area on the first pass and recomputes the count from it. No tuning constant, counts still land in 8–12 / 4–6.
+  **Divergence — `zones` list, not a single `zone`.** Corridors serve all three bands; one zone each would mean authoring four dedicated rooms per band purely to satisfy the no-repeat rule. Mirrors `Enemies.zones`.
+  **Divergence — `area` is derived** (`width * depth`), not authored, so the two cannot drift. `Layout.padPositions` became `Layout.pads` carrying zone and module index, which is what the pad-open schedule needs.
+  **Added:** at most one connector per face (the generator identifies a mating door by face, so two would be ambiguous); connectors sit at face midpoints, which is now an authoring constraint on the Studio geometry — an off-centre doorway lines up in the maths and visibly not in the level.
+  **Found while measuring:** three earlier versions produced *valid* layouts on every seed while filling levels to only 87% of the requested area. Correctness tests cannot see that, so `tools/loadtest/assemble` asserts mean area and layout variety alongside validity, and runs in CI.
 
-- [ ] **M2-2** Room modules (12 for M2, 24 by M7) with tagged connector attachments.
-  *deps: M2-1 · Accept:* `validate-config` asserts every module has 2–4 tagged connectors with valid sizes.
+- [~] **M2-2** Room modules (12 for M2, 24 by M7) with tagged connector attachments.
+  *Data half done:* `src/shared/config/Rooms.luau` — 12 modules, 2–4 tagged connectors each, one pad room per zone. `validate-config` asserts connector counts and sizes, one connector per face, 4-stud grid alignment, exactly one pad per zone, ≥3 modules per zone, and that `targetArea` is reachable at a legal module count. *Verified:* all five rejection cases fire (table in docs/metrics/m2.md).
+  *Remaining:* the Studio geometry itself — sealed boxes with doorways centred on each tagged face, and the adapter that instantiates a `Layout` into the DataModel.
 
 - [ ] **M2-3** Coarse waypoint nav graph built at assembly; entity pathing against it (not `PathfindingService`).
   *deps: M2-1, M1-4 · Accept:* test — path exists between any two nodes in 1,000 generated layouts; path length within 1.4× euclidean.

@@ -97,9 +97,8 @@ t.describe("M1 adapters (Studio-verified)", function()
 	t.todo("MovementGuard: decaying violation score")
 end)
 
+-- Assemble is implemented and covered by tests/assemble.spec.luau.
 t.describe("M2 loop", function()
-	t.todo("Assemble: 1000 seeds all valid, same seed identical")
-	t.todo("Assemble: nav graph connectivity")
 	t.todo("Budget: never exceeds budget, caps respected, deterministic")
 	t.todo("Fsm: all states reachable, no ping-pong, output in bounds")
 end)

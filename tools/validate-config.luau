@@ -20,6 +20,7 @@ local Objectives = require("../src/shared/config/Objectives")
 local Economy = require("../src/shared/config/Economy")
 local Loot = require("../src/shared/config/Loot")
 local Branding = require("../src/shared/config/Branding")
+local Rooms = require("../src/shared/config/Rooms")
 
 local problems: { string } = {}
 
@@ -311,6 +312,127 @@ for _, z in VALID_ZONES do
 	end
 	if total <= 0 then
 		fail(`Loot.rarities.weightPerZone.{z}`, "all rarity weights are zero; nothing can drop in this zone")
+	end
+end
+
+--------------------------------------------------------------------------------
+-- Rooms — the module catalogue Assemble walks
+--------------------------------------------------------------------------------
+
+do
+	local VALID_FACES = { "N", "S", "E", "W" }
+	local VALID_SIZES = { "small", "large" }
+
+	requireNumber("Rooms.targetArea", Rooms.targetArea, 1000, 1000000)
+	requireNumber("Rooms.connectorWidths.small", Rooms.connectorWidths.small, 1, 100)
+	requireNumber("Rooms.connectorWidths.large", Rooms.connectorWidths.large, 1, 100)
+	if Rooms.connectorWidths.small >= Rooms.connectorWidths.large then
+		fail("Rooms.connectorWidths", "small must be narrower than large")
+	end
+
+	local seenIds: { [string]: boolean } = {}
+	local perZone: { [string]: number } = {}
+	local padsPerZone: { [string]: number } = {}
+	local minArea, maxArea = math.huge, 0
+
+	for i, m in Rooms.modules do
+		local w = `Rooms.modules[{i}]`
+		requireString(`{w}.id`, m.id)
+		if typeof(m.id) == "string" then
+			if seenIds[m.id] then
+				fail(`{w}.id`, `duplicate module id "{m.id}"`)
+			end
+			seenIds[m.id] = true
+			w = `Rooms.{m.id}`
+		end
+
+		requireNumber(`{w}.width`, m.width, 1, 1000)
+		requireNumber(`{w}.depth`, m.depth, 1, 1000)
+		if typeof(m.hasPad) ~= "boolean" then
+			fail(`{w}.hasPad`, "must be a boolean")
+		end
+
+		-- Studio geometry is authored on a 4-stud grid; an off-grid module
+		-- lines up in the layout maths and visibly does not in the level.
+		if m.width % 4 ~= 0 or m.depth % 4 ~= 0 then
+			fail(`{w}`, `extents {m.width}x{m.depth} are not multiples of 4 studs`)
+		end
+
+		local area = m.width * m.depth
+		minArea = math.min(minArea, area)
+		maxArea = math.max(maxArea, area)
+
+		-- 2-4 tagged connectors, at most one per face. Assemble identifies a
+		-- module's mating door by face alone, so two on one face would be
+		-- ambiguous rather than merely unusual.
+		if typeof(m.connectors) ~= "table" then
+			fail(`{w}.connectors`, "missing")
+		else
+			local n = #m.connectors
+			if n < 2 or n > 4 then
+				fail(`{w}.connectors`, `{n} connectors, expected 2 to 4`)
+			end
+			local seenFaces: { [string]: boolean } = {}
+			for j, c in m.connectors do
+				requireOneOf(`{w}.connectors[{j}].face`, c.face, VALID_FACES)
+				requireOneOf(`{w}.connectors[{j}].size`, c.size, VALID_SIZES)
+				if seenFaces[c.face] then
+					fail(`{w}.connectors`, `two connectors on face {c.face}`)
+				end
+				seenFaces[c.face] = true
+			end
+		end
+
+		if typeof(m.zones) ~= "table" or #m.zones == 0 then
+			fail(`{w}.zones`, "must list at least one zone")
+		else
+			for _, z in m.zones do
+				requireOneOf(`{w}.zones`, z, VALID_ZONES)
+				perZone[z] = (perZone[z] or 0) + 1
+				if m.hasPad then
+					padsPerZone[z] = (padsPerZone[z] or 0) + 1
+				end
+			end
+		end
+	end
+
+	if #Rooms.modules == 0 then
+		fail("Rooms.modules", "catalogue is empty")
+	end
+
+	for _, z in VALID_ZONES do
+		-- One pad room per zone: the three extraction pads are one per depth
+		-- band, and Assemble places exactly one from each.
+		if (padsPerZone[z] or 0) ~= 1 then
+			fail(`Rooms.modules`, `zone {z} has {padsPerZone[z] or 0} pad module(s), expected exactly 1`)
+		end
+		-- Fewer than three and consecutive placements in that band cannot
+		-- differ, which deadlocks the no-repeat-within-2-hops rule.
+		if (perZone[z] or 0) < 3 then
+			fail(`Rooms.modules`, `zone {z} has {perZone[z] or 0} module(s), at least 3 are needed`)
+		end
+	end
+
+	-- The area target has to be reachable at some legal module count, or every
+	-- seed fails at runtime rather than here.
+	if #Rooms.modules > 0 then
+		local minTotal = 12 -- SPINE_MIN + BRANCH_MIN
+		local maxTotal = 18 -- SPINE_MAX + BRANCH_MAX
+		local floorArea = minTotal * minArea
+		local ceilArea = maxTotal * maxArea
+		if Rooms.targetArea < floorArea or Rooms.targetArea > ceilArea then
+			fail(
+				"Rooms.targetArea",
+				string.format(
+					"%.0f is outside what %d-%d modules can cover (%.0f to %.0f)",
+					Rooms.targetArea,
+					minTotal,
+					maxTotal,
+					floorArea,
+					ceilArea
+				)
+			)
+		end
 	end
 end
 

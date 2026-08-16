@@ -59,6 +59,12 @@ jobs:
       - name: Serialization benchmark and budget check
         run: lune run tools/loadtest/serialize
 
+      # Asserts the generator still succeeds on every seed, fills the level to
+      # the designed size, and varies with the seed. The unit tests check that a
+      # layout is valid; this checks the ones it produces are worth playing.
+      - name: Level assembly benchmark and budget check
+        run: lune run tools/loadtest/assemble
+
       - name: Rojo build
         run: rojo build -o /tmp/deepcache.rbxl
 
