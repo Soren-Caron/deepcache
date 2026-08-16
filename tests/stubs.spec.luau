@@ -101,9 +101,10 @@ end)
 -- What remains in M2 is adapter work (level instantiation, enemy roster,
 -- weapons, loot, run lifecycle, HUD), verified in Studio rather than here.
 t.describe("M2 adapters (Studio-verified)", function()
-	t.todo("LevelService: instantiate a Layout into the DataModel")
-	t.todo("LootService: spawn tables, pickup/drop, weight -> speed")
-	t.todo("RunService_: 12:00 clock, pad schedule, extraction, death")
+	t.todo("EntityService: full enemy roster, behaviours on the nav graph")
+	t.todo("CombatService: Carbine burst, Slug projectile entity, Arc per-tick beam")
+	t.todo("LootService: ground instances, pickup prompts, carried-weight speed")
+	t.todo("RunService_: clock and pad schedule driving a live run")
 	t.todo("HUD: timer, weight, HP, ammo, pad status")
 end)
 
