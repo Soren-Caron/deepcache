@@ -193,8 +193,13 @@ Additional pure-core modules extracted so the adapters stay thin, all tested:
 - [ ] **M2-7** `RunService_` — 12:00 timer, pad open schedule, extraction, death, individual extraction.
   *deps: M2-6 · Accept:* Studio — full run completes; one player extracting doesn't end the run for others.
 
-- [ ] **M2-8** `core/sim/Budget.luau` + spawn director scaling formulas from [01 §Scaling].
-  *deps: M1-4 · Accept:* test — spend never exceeds budget; per-type caps respected; deterministic under fixed seed; headcount and time ramp match the formula exactly.
+- [x] **M2-8** `core/sim/Budget.luau` + spawn director scaling formulas from [01 §Scaling].
+  *Verified:* `timeRamp` and `headcountMul` checked against hand-computed values from the design doc (1.0 / 1.45 / 1.9 and 1.0 / 1.4 / 1.8 / 2.2), not against a re-implementation of themselves; spend never exceeds budget across 3,000 plan calls; leftover is always smaller than the cheapest remaining option, so "never exceeds" cannot pass by spending nothing; per-type caps and caps overrides respected; zone availability respected; identical for a fixed seed and varied across seeds; `spent` equals the exact sum of what was placed.
+  **Divergence — `compute` takes `zoneMultiplier: number`, not a `Zone`,** and `PlanParams` gains a `roster`. Core cannot read config, so the zone multiplier and the enemy table arrive as arguments and the adapter owns the mapping. Same reasoning as M1-4's `Stats` parameter.
+  **Added — the director multiplier is clamped here too,** even though M4's `Clamp` already bounds it. This is the last arithmetic before spawn counts; an unclamped multiplier turns a bad model response into an unplayable wave instead of a logged warning. A test asserts the bounds match `Schema.DEFAULT_BOUNDS` (duplicated rather than required, because `core/sim` depending on `core/director` would invert the layering).
+  **Added — `timeRamp` clamps at the run length.** A run ticks past 12:00 while the last player extracts, and an unclamped ramp would keep raising the budget during exactly the moment the level should be emptying.
+  **Added — loud failures for two adapter bugs that would otherwise hide:** no spawn points supplied, and a zero-cost enemy (which would make the spend loop non-terminating).
+  *Not built:* `spawnPattern` (even / flank / chokepoint / hunt_heaviest) — spawn points are picked uniformly for now. The patterns are director-driven and land with M4.
 
 - [ ] **M2-9** `core/director/Fsm.luau` — BUILD→PRESSURE→SPIKE→LULL with the pacing curve.
   *deps: M2-8 · Accept:* test — every state reachable, no state ping-pongs within 3 ticks, output multiplier stays in `[0.6, 1.6]`.

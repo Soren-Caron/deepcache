@@ -97,9 +97,8 @@ t.describe("M1 adapters (Studio-verified)", function()
 	t.todo("MovementGuard: decaying violation score")
 end)
 
--- Assemble is implemented and covered by tests/assemble.spec.luau.
+-- Assemble, Path and Budget are implemented, with their own spec files.
 t.describe("M2 loop", function()
-	t.todo("Budget: never exceeds budget, caps respected, deterministic")
 	t.todo("Fsm: all states reachable, no ping-pong, output in bounds")
 end)
 
