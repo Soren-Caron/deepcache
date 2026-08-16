@@ -50,6 +50,28 @@ Not fully procedural terrain — **procedurally assembled from hand-authored roo
 
 Area is derived as `width * depth` rather than authored, so the two cannot drift.
 
+**Nav, as built (M2-3, `core/level/Path.luau`).** One waypoint per room centre
+and one per doorway, ~35 nodes for a full level; A* with a euclidean heuristic.
+Rooms never link directly to each other — a route between two rooms goes through
+the doorway node, which is where the geometry forces you, so following
+consecutive nodes in a straight line stays inside the level.
+
+The "path length within 1.4× euclidean" constraint **does not hold and cannot**:
+two rooms either side of a shared wall are 60 studs apart in a straight line and
+several hundred studs of walking. It holds at the median (1.33) and the mean
+(1.36); the worst single pair is 9.53×. Replaced by three checks that mean what
+the original was reaching for — optimality against an independent Dijkstra (0
+disagreements over 94,737 pairs), the median/mean bound, and a hard ceiling.
+Numbers in [docs/metrics/m2.md](metrics/m2.md).
+
+**Open design question: the level is a tree.** Spine plus dead-end branches gives
+17 connections for 18 modules and no loops, so every route backtracks and a third
+of waypoint pairs walk more than 1.4× the straight line. Loops cannot be closed
+for free — measured 0 across 300 layouts, because face-midpoint connectors almost
+never leave two unused doors coincident. Adding them means steering placement to
+mate a module against two doors at once, which changes level topology and so is
+a design call, not an implementation one.
+
 **Zones.** Three depth bands (Perimeter / Processing / Vault). Deeper = better loot, more enemies, worse lighting, and the extraction pad that opens later.
 
 ## Enemies
