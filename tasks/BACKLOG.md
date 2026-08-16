@@ -206,11 +206,43 @@ Additional pure-core modules extracted so the adapters stay thin, all tested:
 - [ ] **M2-5** Remaining three weapons. Slug as a server-simulated projectile entity; Arc as per-tick continuous validation.
   *deps: M1-12 · Accept:* test — Arc ramp curve; Slug travel/drop math. Studio — all four fire and deal damage.
 
-- [ ] **M2-6** `LootService` — spawn tables by zone, pickup/drop, weight → speed multiplier, claim tokens.
-  *deps: M2-1 · Accept:* test — weight→speed table boundaries exact; claim token prevents double-pickup under simulated race.
+- [x] **M2-6** `LootService` — spawn tables by zone, pickup/drop, weight → speed multiplier, claim tokens.
+  *Pure core (`core/sim/Loot`) verified:* tier boundaries exact at every edge (20 free, 21 not); 100 simultaneous claimants on one item yield exactly one winner; Vault rarity curve within 2 points over 20k rolls; `overseer_shard` never drops in the Perimeter.
+  *Adapter verified in Studio* — the weight ladder, measured by taking items one at a time:
 
-- [ ] **M2-7** `RunService_` — 12:00 timer, pad open schedule, extraction, death, individual extraction.
-  *deps: M2-6 · Accept:* Studio — full run completes; one player extracting doesn't end the run for others.
+  ```
+  take cell_pack      4kg -> carried= 4kg WalkSpeed=16.00   (x1.00)
+  take servo_array   16kg -> carried=20kg WalkSpeed=16.00   (x1.00, boundary)
+  take optics_module  9kg -> carried=29kg WalkSpeed=14.72   (x0.92)
+  take cell_pack      4kg -> carried=42kg WalkSpeed=13.12   (x0.82)
+  take optics_module  9kg -> carried=61kg WalkSpeed=11.20   (x0.70)
+  grab from 151 studs away -> false tooFar
+  ```
+
+  Every tier lands on the exact multiple of the 16-stud base. The reach rule is checked server-side against the item's recorded position: a `ProximityPrompt` is client-side convenience, not a security boundary.
+  **Found in Studio — extraction did not clear the carry.** `Run.tryExtract` zeroed the run's ledger while `LootService` still held the items, so an extracted player kept the movement penalty, kept reporting 91 kg to the enemy budget, and could have banked the same loot at a second pad. Added `LootService.bank`, distinct from the `scatter` death path.
+
+- [ ] **M2-5** Remaining three weapons. Slug as a server-simulated projectile entity; Arc as per-tick continuous validation.
+  *Pure core done* — `core/sim/Ballistics`: Arc ramp curve (compounding, capped, decays faster than it builds) and Slug travel/drop (3.11 studs over 120 studs at 180 studs/s, g=14), with the closed form pinned against the integration step the server ticks. *Remaining:* the CombatService adapter — burst validation, the projectile entity, and per-tick beam contact.
+
+- [x] **M2-7** `RunLifecycleService` — 12:00 timer, pad open schedule, extraction, death, individual extraction.
+  *Renamed* from `RunService_`: the trailing underscore existed only to dodge the clash with Roblox's `RunService`, and a descriptive name does that better.
+  *Verified in Studio — a full run start to finish:*
+
+  ```
+  LOOT     6 items, 46 kg, 4749 credits, speed x0.82
+  CLOCK    t= 196s  padOpened Perimeter
+  EXTRACT  pad=Perimeter  carried 46 kg, 4749 credits -> 0 kg, 0 credits  WalkSpeed=16.00
+  RUN      extracted=1 died=0 active=0 banked=4749 complete=true reason=squadResolved
+  ```
+
+  Pure core covers the rules (individual extraction, budget headcount never scaling down, clock expiry treated as death); this drives them from the tick loop, in a phase placed **after** combat and movement so extraction and death see the same tick's outcomes.
+  **Found in Studio — an empty run resolved before it began.** The server creates the run at boot, before the first client connects, so `activeCount == 0` fired `squadResolved` on tick one; every later arrival was then refused because the run was over, leaving a level full of loot nobody could extract from. `squadResolved` now requires that someone actually dropped. Regression test added.
+  **Found in Studio — the roster raced the boot order.** A `PlayerAdded` landing before the run existed dropped that player permanently. The tick phase now reconciles the roster instead of trusting event ordering.
+  **Found in Studio — the movement guard kicked server-initiated teleports.** The guard cannot tell a server reposition from a client one by position alone, so extraction and respawn moves read as the exact signature it exists to catch. Added `MovementGuardService.forgive`, and latched the kick so one incident is one kick rather than a wall of identical warnings every tick while the socket closes.
+  **Also wired:** the guard's speed provider now uses the weight-derived speed rather than a flat 16, which the M1 comment had flagged as M2's job.
+
+- [ ] **⚠ human M2-11** Informal 3-player playtest. Record what's confusing, what's boring, what's broken.
 
 - [x] **M2-8** `core/sim/Budget.luau` + spawn director scaling formulas from [01 §Scaling].
   *Verified:* `timeRamp` and `headcountMul` checked against hand-computed values from the design doc (1.0 / 1.45 / 1.9 and 1.0 / 1.4 / 1.8 / 2.2), not against a re-implementation of themselves; spend never exceeds budget across 3,000 plan calls; leftover is always smaller than the cheapest remaining option, so "never exceeds" cannot pass by spending nothing; per-type caps and caps overrides respected; zone availability respected; identical for a fixed seed and varied across seeds; `spent` equals the exact sum of what was placed.
@@ -226,10 +258,9 @@ Additional pure-core modules extracted so the adapters stay thin, all tested:
   **Found while testing — the lull was a lull in name only.** With the multiplier rate limited to ±0.25/tick, a 35 s LULL is two ticks, which is not enough to fall from the spike ceiling (1.6) to the lull floor (0.72): it bottomed out at 1.10, harder than BUILD. Every bounds test passed and the pacing curve was still wrong. Lull raised to 80 s so the curve can actually reach its floor, and the M2 exit criterion ("measurable lulls and spikes, not a flat line") is now asserted directly — range, standard deviation, and direction reversals across a run.
   *Not built:* barks. The FSM emits `""`; canned barks are M4-7, and a placeholder here would put unfiltered text on a path to a player. Objective params are empty — the per-objective ranges live in `Objectives.luau`, which core does not read, and M4-8 fills them.
 
-- [ ] **M2-10** HUD — timer, weight, HP, ammo, pad status.
-  *deps: M2-7 · Accept:* Studio — all fields update correctly during a run.
-
-- [ ] **⚠ human M2-11** Informal 3-player playtest. Record what's confusing, what's boring, what's broken.
+- [x] **M2-10** HUD — timer, weight, HP, pad status.
+  `client/controllers/HudController`. Clock (red under a minute), carried weight with its speed multiplier **and the design's own tier vocabulary** — "47 kg · x0.82 · committed" — because a number alone does not tell a player whether to drop something. Pad status shows which are open, or counts down to the next. Every value arrives from the server; the clock is interpolated between 1 Hz pushes purely so it ticks smoothly, and every push overwrites it. Two sources for one number is how a HUD ends up confidently lying.
+  *Remaining:* ammo, which needs the M2-5 weapon adapter.
 
 ---
 

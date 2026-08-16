@@ -273,6 +273,42 @@ t.describe("Run summary", function()
 		expect(summary.startingHeadcount).toEqual(4)
 	end)
 
+	t.it("does not resolve an empty run before anyone has joined", function()
+		-- The server boots and creates the run before the first client
+		-- connects. Treating "nobody active" as "squad resolved" ended the run
+		-- on tick one and then refused every arrival, leaving a level nobody
+		-- could extract from. Caught in Studio, not here.
+		local state = Run.new(1, 720, {})
+		advance(state, 30)
+		expect(state.complete).toBeFalsy()
+
+		expect(Run.addPlayer(state, 1)).toBeTruthy()
+		advance(state, 5)
+		expect(state.complete).toBeFalsy()
+		expect(Run.activeCount(state)).toEqual(1)
+	end)
+
+	t.it("still resolves once a squad that did drop is all out", function()
+		local state = newRun({ 1, 2 })
+		Run.kill(state, 1)
+		Run.kill(state, 2)
+		Run.step(state, 1, SCHEDULE)
+		expect(state.complete).toBeTruthy()
+		expect(state.endReason).toEqual("squadResolved")
+	end)
+
+	t.it("admits a late arrival and raises the budget headcount", function()
+		local state = newRun({ 1, 2 })
+		expect(Run.addPlayer(state, 3)).toBeTruthy()
+		expect(Run.activeCount(state)).toEqual(3)
+		expect(Run.budgetHeadcount(state)).toEqual(3)
+
+		-- Idempotent, and closed once the run is over.
+		expect(Run.addPlayer(state, 3)).toBeFalsy()
+		advance(state, 720)
+		expect(Run.addPlayer(state, 4)).toBeFalsy()
+	end)
+
 	t.it("ignores duplicate player ids at the drop", function()
 		local state = Run.new(1, 720, { 7, 7, 7 })
 		expect(state.startingHeadcount).toEqual(1)

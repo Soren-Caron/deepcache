@@ -27,6 +27,7 @@ type Tracked = {
 	lastPos: Types.Vec3?,
 	lastTime: number,
 	corrections: number,
+	kicked: boolean?,
 }
 
 local tracked: { [Player]: Tracked } = {}
@@ -47,6 +48,23 @@ end
 
 function MovementGuardService.setSpeedProvider(provider: (player: Player) -> number)
 	speedProvider = provider
+end
+
+--- Forget a player's last known position, so the next sample starts a fresh
+--- baseline instead of being scored as a jump.
+---
+--- Call this whenever the *server* moves a character on purpose: a respawn at
+--- the drop point, an extraction, a scripted reposition. The guard cannot tell
+--- a server teleport from a client one by looking at positions, and without
+--- this every legitimate server-side move reads as the exact signature the
+--- guard exists to catch. Found when a diagnostics probe repositioned a player
+--- onto loot and got them kicked.
+function MovementGuardService.forgive(player: Player)
+	local entry = tracked[player]
+	if entry then
+		entry.lastPos = nil
+		entry.lastTime = TickService.now()
+	end
 end
 
 function MovementGuardService.setWorldBounds(min: Types.Vec3, max: Types.Vec3)
@@ -121,7 +139,12 @@ function MovementGuardService.step(_tick: number, dt: number)
 				root.CFrame = CFrame.new(target.x, target.y, target.z)
 				Remotes.event("PositionCorrection"):FireClient(player, Vector3.new(target.x, target.y, target.z))
 				position = target
-			elseif verdict.action == "kick" then
+			elseif verdict.action == "kick" and not entry.kicked then
+				-- Once. The score decays slowly, so without this latch the
+				-- same player is kicked again every tick until they finish
+				-- disconnecting — a wall of identical warnings, and at M3 a
+				-- wall of identical telemetry events for one incident.
+				entry.kicked = true
 				warn(`[MovementGuard] kicking {player.Name}: {table.concat(verdict.reasons, ",")} score={verdict.score}`)
 				player:Kick("Movement validation failed.")
 			end

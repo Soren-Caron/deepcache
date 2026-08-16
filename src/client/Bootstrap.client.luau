@@ -12,9 +12,11 @@ local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 local Branding = require(Shared.config.Branding)
 local EntityRenderer = require("./controllers/EntityRenderer")
 local PredictionController = require("./controllers/PredictionController")
+local HudController = require("./controllers/HudController")
 
 local function main()
 	EntityRenderer.start()
+	HudController.start()
 
 	PredictionController.setHooks({
 		onTracer = function(origin: Vector3, target: Vector3)
@@ -39,7 +41,7 @@ local function main()
 
 	PredictionController.start()
 
-	print(`[{Branding.gameName}] client up — rendering interpolated entities`)
+	print(`[{Branding.gameName}] client up — entities, prediction, HUD`)
 end
 
 main()

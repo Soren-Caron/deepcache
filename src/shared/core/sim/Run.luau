@@ -81,6 +81,28 @@ function Run.new(seed: number, lengthSeconds: number, playerIds: { number }): Ru
 	}
 end
 
+--- Admit a player after the drop. Returns false if they are already in.
+---
+--- Raises `startingHeadcount` too, so the enemy budget accounts for them.
+--- Extraction never lowers it — that asymmetry is the design: leaving makes
+--- the run harder for those who stay, arriving makes it harder for everyone.
+function Run.addPlayer(state: RunState, playerId: number): boolean
+	if state.complete or state.players[playerId] ~= nil then
+		return false
+	end
+	state.players[playerId] = {
+		id = playerId,
+		status = "active",
+		carriedWeight = 0,
+		carriedValue = 0,
+		endedAtSeconds = nil,
+		bankedValue = 0,
+	}
+	table.insert(state.order, playerId)
+	state.startingHeadcount += 1
+	return true
+end
+
 function Run.secondsRemaining(state: RunState): number
 	return math.max(0, state.lengthSeconds - state.elapsedSeconds)
 end
@@ -164,7 +186,12 @@ function Run.step(state: RunState, dt: number, schedule: PadSchedule): { Event }
 		return events
 	end
 
-	if Run.activeCount(state) == 0 then
+	-- "Everyone is out" only means something once someone was in. A run
+	-- created before its players have joined — which is every run, since the
+	-- server boots before the first client connects — would otherwise resolve
+	-- on tick one and refuse every later arrival, leaving a level full of loot
+	-- that nobody can extract from.
+	if state.startingHeadcount > 0 and Run.activeCount(state) == 0 then
 		finish(state, "squadResolved", events)
 	end
 

@@ -45,6 +45,17 @@ local DECLARATIONS: { [string]: RemoteKind } = {
 
 	--- Server -> client. Run lifecycle, objectives, OVERSEER barks (M2/M4).
 	RunEvent = "Reliable",
+
+	--- Client -> server. Ask to pick up or drop a specific ground item. The
+	--- server decides; a client asking twice for the same uid loses the second
+	--- time, which is the whole point of the claim in core/sim/Loot.
+	LootRequest = "Reliable",
+	--- Server -> client. Carried manifest, total weight, speed multiplier.
+	--- Reliable because a lost update leaves the HUD lying about the one number
+	--- the player is making decisions on.
+	CarryUpdate = "Reliable",
+	--- Server -> client, ~1Hz. Clock, pad states, squad status for the HUD.
+	RunState = "Reliable",
 }
 
 local CLASS_BY_KIND: { [RemoteKind]: string } = {

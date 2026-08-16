@@ -23,6 +23,8 @@ local Remotes = require(Shared.net.Remotes)
 
 local TickService = require("./services/TickService")
 local LevelService = require("./services/LevelService")
+local LootService = require("./services/LootService")
+local RunLifecycleService = require("./services/RunLifecycleService")
 local EntityService = require("./services/EntityService")
 local ReplicationService = require("./services/ReplicationService")
 local CombatService = require("./services/CombatService")
@@ -65,6 +67,23 @@ local function main()
 	ReplicationService.init()
 	CombatService.init()
 	MovementGuardService.init()
+	LootService.init()
+	RunLifecycleService.init()
+
+	-- Loot asks the run whether a player may still carry, so a dead or
+	-- extracted player cannot keep looting.
+	LootService.setCarryPredicate(RunLifecycleService.isActive)
+
+	-- The guard has to use the same speed the movement code does. It defaulted
+	-- to a flat 16, which is merely lenient for a loaded player — but once
+	-- weight makes people slower, a guard that still assumes 16 is checking a
+	-- limit nobody can reach.
+	MovementGuardService.setSpeedProvider(function(player: Player): number
+		local weight = LootService.carriedWeight(player.UserId)
+		local Loot = require(Shared.core.sim.Loot)
+		local Economy = require(Shared.config.Economy)
+		return LootService.BASE_WALK_SPEED * Loot.speedMultiplier(weight, Economy.weight.tiers :: any)
+	end)
 
 	EntityService.setTargetProvider(playerTargets)
 
@@ -72,7 +91,12 @@ local function main()
 	TickService.addPhase("history", EntityService.recordHistory)
 	TickService.addPhase("combat", CombatService.step)
 	TickService.addPhase("movement", MovementGuardService.step)
+	-- After combat and movement: extraction and death must see this tick's
+	-- outcomes, or a player killed on the tick they reach a pad extracts anyway.
+	TickService.addPhase("run", RunLifecycleService.step)
 	TickService.addPhase("replication", ReplicationService.step)
+
+	RunLifecycleService.start(Rooms.defaultSeed)
 
 	-- Diagnostics must be registered from this context: the command bar has its
 	-- own module registry and would otherwise see fresh, idle service instances.
@@ -152,6 +176,159 @@ local function main()
 		return LevelService.describe()
 	end)
 	Diagnostics.register("levelInfo", LevelService.describe)
+
+	-- M2-7 acceptance: stand on an open pad and extract. Holds the player there
+	-- across several ticks because the client owns the character and reverts a
+	-- single server-side move, and forgives the guard each time — otherwise the
+	-- reposition is scored as the exact teleport signature it exists to catch.
+	Diagnostics.register("extractProbe", function(zone: string?)
+		local player = Players:GetPlayers()[1]
+		local character = player and player.Character
+		local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+		if rootPart == nil then
+			return { error = "no character" }
+		end
+		local level = Workspace:FindFirstChild("Level")
+		local pads = level and level:FindFirstChild("Pads")
+		if pads == nil then
+			return { error = "no pads" }
+		end
+
+		local target: BasePart? = nil
+		for _, pad in pads:GetChildren() do
+			if pad:IsA("BasePart") and (zone == nil or pad:GetAttribute("zone") == zone) then
+				target = pad
+				break
+			end
+		end
+		if target == nil then
+			return { error = `no pad for zone {tostring(zone)}` }
+		end
+
+		local pad = target :: BasePart
+		local carriedBefore = LootService.carriedValue(player.UserId)
+		local weightBefore = LootService.carriedWeight(player.UserId)
+
+		for _ = 1, 24 do
+			rootPart.CFrame = CFrame.new(pad.Position + Vector3.new(0, 4, 0))
+			MovementGuardService.forgive(player)
+			task.wait(0.05)
+		end
+
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		return {
+			pad = pad:GetAttribute("zone"),
+			carriedBefore = string.format("%.0f kg, %d credits", weightBefore, carriedBefore),
+			carriedAfter = string.format(
+				"%.0f kg, %d credits",
+				LootService.carriedWeight(player.UserId),
+				LootService.carriedValue(player.UserId)
+			),
+			walkSpeed = humanoid and humanoid.WalkSpeed or -1,
+			run = RunLifecycleService.describe(),
+		}
+	end)
+	Diagnostics.register("lootInfo", LootService.describe)
+
+	-- M2-6 acceptance, end to end on the running instance: stand the player on
+	-- the nearest item, take it, and report the reach rule refusing a grab from
+	-- across the level.
+	Diagnostics.register("pickupProbe", function(count: number?)
+		local player = Players:GetPlayers()[1]
+		local character = player and player.Character
+		local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+		if rootPart == nil then
+			return { error = "no character" }
+		end
+		local folder = workspace:FindFirstChild("GroundLoot")
+		if folder == nil then
+			return { error = "no ground loot" }
+		end
+
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		local rows: { string } = { string.format("WalkSpeed at rest: %.2f", humanoid.WalkSpeed) }
+
+		local parts: { BasePart } = {}
+		for _, part in folder:GetChildren() do
+			if part:IsA("BasePart") then
+				table.insert(parts, part)
+			end
+		end
+		-- Nearest first, not heaviest first. The character is network-owned by
+		-- the client, so a long server-side teleport is reverted before the
+		-- reach check runs and every distant item reads as `tooFar` — an
+		-- artifact of the harness, not of the rule.
+		table.sort(parts, function(a, b)
+			return (a.Position - rootPart.Position).Magnitude < (b.Position - rootPart.Position).Magnitude
+		end)
+
+		for index = 1, math.min(count or 4, #parts) do
+			local part = parts[index]
+			rootPart.CFrame = CFrame.new(part.Position + Vector3.new(0, 3, 0))
+			-- A server-side reposition is indistinguishable from a teleport
+			-- hack by position alone, so tell the guard this one was ours.
+			MovementGuardService.forgive(player)
+			task.wait(0.25)
+			local ok, reason = LootService.tryPickup(player, part:GetAttribute("uid"))
+			task.wait(0.2)
+			rows[#rows + 1] = string.format(
+				"take %-16s %2dkg -> %-5s %-10s carried=%3.0fkg WalkSpeed=%.2f",
+				part.Name, part:GetAttribute("weight") :: number, tostring(ok), reason or "",
+				LootService.carriedWeight(player.UserId), humanoid.WalkSpeed
+			)
+		end
+
+		-- Reach: the ProximityPrompt is client-side convenience, not security.
+		for _, part in parts do
+			if part.Parent ~= nil and (part.Position - rootPart.Position).Magnitude > 150 then
+				local ok, reason = LootService.tryPickup(player, part:GetAttribute("uid"))
+				rows[#rows + 1] = string.format(
+					"grab from %.0f studs away -> %s %s",
+					(part.Position - rootPart.Position).Magnitude, tostring(ok), reason or ""
+				)
+				break
+			end
+		end
+
+		return rows
+	end)
+	Diagnostics.register("runInfo", RunLifecycleService.describe)
+
+	-- M2-7 acceptance: drive a whole run without waiting twelve real minutes.
+	-- Fast-forwards the clock a chunk at a time and reports what fired.
+	Diagnostics.register("runProbe", function(stepSeconds: number?, steps: number?)
+		local Run = require(Shared.core.sim.Run)
+		local run = RunLifecycleService.getState()
+		if run == nil then
+			return { error = "no run in progress" }
+		end
+
+		local rows: { string } = {}
+		local chunk = stepSeconds or 60
+		for _ = 1, steps or 13 do
+			local before = run.elapsedSeconds
+			-- Step the core state directly: the tick phase advances by real dt,
+			-- and a twelve-minute run is not a smoke test anyone will run.
+			for _, event in Run.step(run, chunk, { Perimeter = 180, Processing = 360, Vault = 540 }) do
+				table.insert(rows, string.format("t=%4ds  %s %s", math.floor(run.elapsedSeconds),
+					event.kind, (event :: any).zone or (event :: any).reason or ""))
+			end
+			if run.complete then
+				break
+			end
+			if run.elapsedSeconds == before then
+				break
+			end
+		end
+
+		local summary = Run.summary(run)
+		table.insert(rows, string.format(
+			"end: complete=%s reason=%s extracted=%d died=%d active=%d banked=%d",
+			tostring(summary.complete), tostring(summary.endReason),
+			summary.extracted, summary.died, summary.active, summary.bankedValue
+		))
+		return rows
+	end)
 	Diagnostics.register("clearLevel", function()
 		LevelService.clear()
 		return "level cleared, scaffolding restored"
@@ -295,7 +472,7 @@ local function main()
 
 	TickService.start()
 
-	print(`[{Branding.gameName}] server up — tick {1 / 20}s, phases: sim/history/combat/movement/replication`)
+	print(`[{Branding.gameName}] server up — tick {1 / 20}s, phases: sim/history/combat/movement/run/replication`)
 	print(
 		`[{Branding.gameName}] level seed {layout.seed} — {#layout.modules} modules `
 			.. `({layout.spineCount} spine + {layout.branchCount} branches), {layout.totalArea} studs^2`
