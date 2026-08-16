@@ -201,8 +201,11 @@ Additional pure-core modules extracted so the adapters stay thin, all tested:
   **Added — loud failures for two adapter bugs that would otherwise hide:** no spawn points supplied, and a zero-cost enemy (which would make the spend loop non-terminating).
   *Not built:* `spawnPattern` (even / flank / chokepoint / hunt_heaviest) — spawn points are picked uniformly for now. The patterns are director-driven and land with M4.
 
-- [ ] **M2-9** `core/director/Fsm.luau` — BUILD→PRESSURE→SPIKE→LULL with the pacing curve.
-  *deps: M2-8 · Accept:* test — every state reachable, no state ping-pongs within 3 ticks, output multiplier stays in `[0.6, 1.6]`.
+- [x] **M2-9** `core/director/Fsm.luau` — BUILD→PRESSURE→SPIKE→LULL with the pacing curve.
+  *Verified:* every state reached in a 36-tick run and the cycle runs in order; **no state re-entered within 3 ticks across 200 adversarial trials** driving health and quiet-time randomly to force oscillation; `spawnMultiplier` stays in `[0.6, 1.6]` and `threatTier` in `[1, 5]` over 2,000 ticks fed NaN health and NaN dt; per-tick deltas never exceed the schema's rate limits; the emitted decision always satisfies the schema; identical input sequences produce identical output.
+  **Design added (docs/05 specified the FSM's role and bounds, not its transition table):** dwell floors per state, a critical-health escape to LULL from anywhere, and a boredom escape that skips ahead when nothing has happened for 75 s. The no-ping-pong rule is enforced explicitly by recording the tick each state was left, rather than being left to emerge from the dwell floors.
+  **Found while testing — the lull was a lull in name only.** With the multiplier rate limited to ±0.25/tick, a 35 s LULL is two ticks, which is not enough to fall from the spike ceiling (1.6) to the lull floor (0.72): it bottomed out at 1.10, harder than BUILD. Every bounds test passed and the pacing curve was still wrong. Lull raised to 80 s so the curve can actually reach its floor, and the M2 exit criterion ("measurable lulls and spikes, not a flat line") is now asserted directly — range, standard deviation, and direction reversals across a run.
+  *Not built:* barks. The FSM emits `""`; canned barks are M4-7, and a placeholder here would put unfiltered text on a path to a player. Objective params are empty — the per-objective ranges live in `Objectives.luau`, which core does not read, and M4-8 fills them.
 
 - [ ] **M2-10** HUD — timer, weight, HP, ammo, pad status.
   *deps: M2-7 · Accept:* Studio — all fields update correctly during a run.

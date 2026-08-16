@@ -97,9 +97,14 @@ t.describe("M1 adapters (Studio-verified)", function()
 	t.todo("MovementGuard: decaying violation score")
 end)
 
--- Assemble, Path and Budget are implemented, with their own spec files.
-t.describe("M2 loop", function()
-	t.todo("Fsm: all states reachable, no ping-pong, output in bounds")
+-- M2 pure core is complete: see assemble / path / budget / fsm spec files.
+-- What remains in M2 is adapter work (level instantiation, enemy roster,
+-- weapons, loot, run lifecycle, HUD), verified in Studio rather than here.
+t.describe("M2 adapters (Studio-verified)", function()
+	t.todo("LevelService: instantiate a Layout into the DataModel")
+	t.todo("LootService: spawn tables, pickup/drop, weight -> speed")
+	t.todo("RunService_: 12:00 clock, pad schedule, extraction, death")
+	t.todo("HUD: timer, weight, HP, ammo, pad status")
 end)
 
 t.describe("M4 director", function()
