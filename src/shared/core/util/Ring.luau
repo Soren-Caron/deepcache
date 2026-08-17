@@ -46,6 +46,25 @@ function Ring.push<T>(self: Ring<T>, value: T): T?
 	return evicted
 end
 
+--- Remove and return the oldest entry, FIFO. nil when empty.
+---
+--- The history buffer only ever reads by age, but the telemetry buffer drains
+--- oldest-first into a batch, and re-reading then clearing would lose anything
+--- pushed in between. `head` is the write pointer and does not move.
+function Ring.shift<T>(self: Ring<T>): T?
+	if self.count == 0 then
+		return nil
+	end
+	local index = self.head - self.count
+	if index < 1 then
+		index += self.capacity
+	end
+	local value = self.items[index]
+	self.items[index] = nil
+	self.count -= 1
+	return value
+end
+
 --- Age-indexed read: 1 is the newest, `count` is the oldest. nil out of range.
 function Ring.get<T>(self: Ring<T>, age: number): T?
 	if age < 1 or age > self.count then

@@ -266,8 +266,13 @@ Additional pure-core modules extracted so the adapters stay thin, all tested:
 
 ## M3 — Telemetry & dashboard
 
-- [ ] **M3-1** `shared/net/Wire.luau` event envelope types + `TelemetryService` ring buffer with 200-event/5 s flush and drop counters.
-  *deps: M0-5 · Accept:* test on the pure buffer — overflow drops oldest and increments; flush triggers on both conditions.
+- [~] **M3-1** Event envelope types + ring buffer with 200-event/5 s flush and drop counters.
+  *Pure core done* — `core/telemetry/Buffer.luau`. *Verified:* overflow drops the oldest and increments the counter; the buffer never grows past capacity over 10,000 pushes into a 100-slot ring; flush triggers on **both** conditions independently (200 events, or 5 s with a single event) and never on an empty buffer; a drain caps at the batch size and leaves the remainder queued.
+  **Divergence — the envelope lives in `core/telemetry`, not `shared/net/Wire`.** `Wire` is the Roblox↔core boundary and is full of `Vector3` conversions; the envelope is plain data that has to be testable under Lune and serialisable to NDJSON. Putting it in `Wire` would drag engine types into the one payload that must never contain them.
+  **Added — `seq` is assigned on push, not on flush.** The rollup worker detects loss by comparing max `seq` against event count, so numbering at flush time would renumber around a gap and hide exactly what it exists to reveal. A test asserts the gap survives: after 10 pushes into a 4-slot ring, the batch reads seq 7–10 with `dropped = 6`.
+  **Added — `drain`/`commit`/`requeue` split.** The drop counter clears on `commit`, not `drain`, so a batch that fails to post can be retried without losing the count; `requeue` puts a failed batch back ahead of newer events and stays bounded when retries pile up.
+  **Added — `Ring.shift`** for FIFO drain. The history buffer only ever reads by age, but draining oldest-first into a batch then clearing would lose anything pushed in between.
+  *Remaining:* the `TelemetryService` adapter (emit sites, HTTP batching, retry) — it needs the ingest endpoint from M3-3.
 
 - [ ] **M3-2** Emit every event in the [04 §Event catalogue] from its owning service.
   *deps: M3-1, M2-7 · Accept:* Studio — a full run produces at least one of each event type; assert in the smoke script.
