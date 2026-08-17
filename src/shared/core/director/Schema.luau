@@ -1,9 +1,10 @@
 --!strict
 --[[ M4-1. Director response shape.
 
-	Mirrors backend/src/llm/schema.ts. Both are generated from the shared
-	schema.json and a test asserts they stay in sync — a drift here means the
-	model is being asked for a shape the game cannot consume.
+	Mirrors backend/src/llm/schema.ts. Both are hand-written to match
+	schema/director-decision.json, and a test in each language asserts they
+	stay in sync — a drift here means the model is being asked for a shape
+	the game cannot consume.
 ]]
 
 local Schema = {}
@@ -61,16 +62,28 @@ Schema.SPAWN_PATTERNS = SPAWN_PATTERNS
 Schema.OBJECTIVE_IDS = OBJECTIVE_IDS
 Schema.DEFAULT_BOUNDS = DEFAULT_BOUNDS
 
+local function tableContains(list: { string }, value: unknown): boolean
+	if type(value) ~= "string" then
+		return false
+	end
+	for _, candidate in list do
+		if candidate == value then
+			return true
+		end
+	end
+	return false
+end
+
 function Schema.isIntent(value: unknown): boolean
-	error("unimplemented: Schema.isIntent (M4-1)")
+	return tableContains(INTENTS, value)
 end
 
 function Schema.isSpawnPattern(value: unknown): boolean
-	error("unimplemented: Schema.isSpawnPattern (M4-1)")
+	return tableContains(SPAWN_PATTERNS, value)
 end
 
 function Schema.isObjectiveId(value: unknown): boolean
-	error("unimplemented: Schema.isObjectiveId (M4-1)")
+	return tableContains(OBJECTIVE_IDS, value)
 end
 
 return Schema

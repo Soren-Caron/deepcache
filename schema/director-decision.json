@@ -1,0 +1,23 @@
+{
+  "intents": [
+    "escalate",
+    "relieve",
+    "punish_greed",
+    "reward_speed",
+    "split_squad",
+    "focus_weakest",
+    "bait_deeper",
+    "hold_steady"
+  ],
+  "spawnPatterns": ["even", "flank", "chokepoint", "hunt_heaviest"],
+  "objectiveIds": ["purge_node", "hold_terminal", "escort_cart", "no_loot_window", "hunt_warden"],
+  "bounds": {
+    "spawnMultiplierMin": 0.6,
+    "spawnMultiplierMax": 1.6,
+    "spawnMultiplierMaxDelta": 0.25,
+    "threatTierMin": 1,
+    "threatTierMax": 5,
+    "threatTierMaxDelta": 1,
+    "barkMaxChars": 180
+  }
+}

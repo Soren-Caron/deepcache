@@ -80,9 +80,20 @@ Register a new handler in `Bootstrap.server` rather than reaching into services 
 
 ## Model choices (already decided, don't re-litigate)
 
+**Revised at M4 kickoff: self-hosted via Ollama, not the Anthropic API.** Original decision (Haiku for ticks, Opus for briefing/debrief) is preserved below for history; superseded for cost (self-hosted is free after the one-time hardware cost) and because running the director on locally-hosted open models is itself something worth showing on a portfolio, not just an implementation detail.
+
+- Director ticks: `llama3.2:3b` via Ollama — small enough to have a shot at the 1200ms tick budget on consumer GPU hardware.
+- Pre-run briefing and post-run debrief: `llama3.1:8b` via Ollama — not latency-critical, so the larger model is affordable there.
+- Real measured latency, GPU-warm (RTX 5070 laptop, 8GB VRAM): ~0.9-1.0s per tick-shaped structured-JSON request — under the 1200ms budget but with real, expected-nontrivial margin, not headroom to ignore. Cold model load (Ollama evicts idle models, default ~5 min) measured at ~40s — mitigated with `keep_alive` pinning, not left to chance.
+- Rationale, the original Anthropic-based cost math (kept for reference), and the Ollama revision: [docs/05-OVERSEER-DIRECTOR.md](docs/05-OVERSEER-DIRECTOR.md).
+
+<details>
+<summary>Superseded: original Anthropic-based decision</summary>
+
 - Director ticks: `claude-haiku-4-5` — latency-critical, structured JSON, cheap.
 - Pre-run briefing and post-run debrief: `claude-opus-5` — not latency-critical, quality matters.
-- Rationale and cost math: [docs/05-OVERSEER-DIRECTOR.md](docs/05-OVERSEER-DIRECTOR.md).
+
+</details>
 
 ## When the spec is wrong
 

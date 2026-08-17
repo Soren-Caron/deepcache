@@ -108,11 +108,9 @@ t.describe("M2 adapters (Studio-verified)", function()
 	t.todo("HUD: timer, weight, HP, ammo, pad status")
 end)
 
-t.describe("M4 director", function()
-	t.todo("Schema: enum guards")
-	t.todo("Clamp: 20+ malformed inputs all return a valid decision")
-	t.todo("Clamp: rate limiting and bark sanitisation")
-end)
+-- M4 director's pure core (Schema, Clamp) is complete: see
+-- director-schema.spec.luau and clamp.spec.luau. What remains in M4 is the
+-- backend LLM proxy and adapter code, verified via vitest and Studio.
 
 t.describe("M5 discovery", function()
 	t.todo("Rating: matches hand-computed values, rd shrink/grow")

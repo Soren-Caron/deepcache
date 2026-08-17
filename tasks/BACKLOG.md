@@ -356,8 +356,9 @@ Additional pure-core modules extracted so the adapters stay thin, all tested:
 
 ## M4 — OVERSEER
 
-- [ ] **M4-1** `backend/src/llm/schema.ts` + `core/director/Schema.luau` from a shared `schema.json`. Sync test.
+- [x] **M4-1** `backend/src/llm/schema.ts` + `core/director/Schema.luau` from a shared `schema.json`. Sync test.
   *deps: M0-6 · Accept:* vitest + lune both assert field names and enum members match `schema.json`.
+  `schema/director-decision.json` at repo root is the hand-maintained canonical source (intents, spawn patterns, objective ids, bounds). `Schema.luau`'s guard functions (`isIntent`/`isSpawnPattern`/`isObjectiveId`) and `backend/src/llm/schema.ts` were both already-scaffolded/hand-written to match it independently; the sync tests in each language load the JSON directly and assert against it, so neither file is trusted as the other's source of truth — both are checked against a third, independent file. `lune run tests`: 3 new guard tests + 4 sync tests, all pass. `npm --prefix backend test`: 7 new tests (`llm-schema.test.ts`), all pass.
 
 - [ ] **M4-2** System prompt `prompts/overseer.v1.md` — lore, whitelist with param semantics, voice, 4 worked examples (2 good, 2 bad).
   *deps: M4-1 · Accept:* `countTokens` ≥ 4200 (cache eligibility on Haiku 4.5), asserted in a test.
@@ -368,8 +369,11 @@ Additional pure-core modules extracted so the adapters stay thin, all tested:
 - [ ] **M4-4** `llm/fallback.ts` — balanced-brace JSON extraction from free text.
   *deps: M4-3 · Accept:* vitest — extracts from prose-wrapped JSON, nested braces, JSON inside a code fence; returns null on genuinely unparseable input.
 
-- [ ] **M4-5** `core/director/Clamp.luau` — every rule in [05 §Clamping].
+- [x] **M4-5** `core/director/Clamp.luau` — every rule in [05 §Clamping].
   *deps: M4-1, M2-9 · Accept:* **test with ≥20 malformed inputs** (null, `{}`, wrong types, out-of-range, unknown enum, missing fields, extra fields, nested garbage, huge strings) — all return a valid `DirectorDecision`, none throw.
+  33 test cases in `tests/clamp.spec.luau`: 23 explicit malformed-input cases (nil, empty table, wrong types on every field, NaN/±inf spawnMultiplier, out-of-range and negative values, unknown enum values on intent/spawnPattern/objective.id, unknown objective param keys, out-of-range objective params, fractional threatTier, non-string/oversized/control-character bark, every field malformed at once, deeply nested garbage) plus dedicated `rateLimited` and `sanitizeBark` unit tests — every case asserts the *full validity* of the returned decision (in-enum, in-range, correct types), not just "didn't throw." `lune run tests`: all pass.
+  **Scope note, documented in docs/05 rather than left implicit:** docs/05's clamping table lists "`objective.id` must be in the whitelist and not currently on cooldown" as one rule, but cooldown tracking is stateful and belongs to M4-8 (the objective system), not to `Clamp`, which is pure and has no notion of time. `Clamp` owns the whitelist half; the caller is responsible for only ever passing a cooldown-legal `baseline.objective`. Two tests assert this split explicitly.
+  Caught two bugs in my own first-draft tests, not in `Clamp` itself, while writing the rate-limit cases: `rateLimited`'s delta-from-`previous` window always applies alongside the absolute-range clamp, so a test asserting "clamps to absolute range" using a `previous` too close to that range's edge was asserting an impossible value — fixed by widening `maxDelta` in that case to isolate the behavior being tested.
 
 - [ ] **M4-6** `DirectorService` — async tick, in-flight guard, circuit breaker (3 failures → 60 s open), apply at tick boundary.
   *deps: M4-3, M4-5 · Accept:* Studio smoke — tick timing unaffected during a director call; unplug backend → FSM continues, breaker opens, recovers.
