@@ -4,7 +4,6 @@ import { buildApp } from "../src/app.js";
 import { loadConfig } from "../src/config.js";
 import { closePool, getPool } from "../src/db.js";
 import { sign } from "../src/hmac.js";
-import { down, up } from "../src/migrate.js";
 
 /**
  * Runs against the real local Postgres (docker-compose), not a mock. The
@@ -67,14 +66,10 @@ async function post(
 beforeAll(async () => {
   process.env["NODE_ENV"] = "test";
   const config = loadConfig();
-  const pool = getPool(config);
-
-  // Start from a known schema regardless of what a previous local `npm run
-  // migrate` left behind, so this suite is not order-dependent on manual
-  // steps.
-  await down(pool, true);
-  await up(pool);
-
+  // Schema reset happens once, in test/global-setup.ts, before any test file
+  // runs -- not here. Two files each dropping and recreating the same live
+  // tables is a race if vitest runs them in parallel, which it does by
+  // default.
   app = await buildApp({ config, logger: false });
   await app.ready();
 });
