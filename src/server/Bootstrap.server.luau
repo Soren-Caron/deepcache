@@ -320,6 +320,17 @@ local function main()
 	end)
 	Diagnostics.register("runInfo", RunLifecycleService.describe)
 	Diagnostics.register("telemetryInfo", TelemetryService.describe)
+
+	-- M3-8 failure drill: push a burst of synthetic events so the ring buffer
+	-- can be forced past capacity deterministically, rather than waiting on
+	-- incidental gameplay volume to maybe overflow it during an outage window.
+	Diagnostics.register("telemetrySpam", function(count: number?)
+		local n = count or 100
+		for i = 1, n do
+			TelemetryService.emit("diagnostic.spam", { i = i })
+		end
+		return `emitted {n} synthetic events`
+	end)
 	Diagnostics.register("telemetryFlush", function()
 		local landed = TelemetryService.flushOnce(true)
 		return { landed = landed, state = TelemetryService.describe() }

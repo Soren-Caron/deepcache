@@ -181,6 +181,13 @@ local function flushOnce(force: boolean?): boolean
 		Buffer.commit(buffer)
 		metrics.posted += #batch
 		consecutiveFailures = 0
+		-- A successful flush ends an outage. Leaving the previous failure's
+		-- message in place would have `describe()` report a live error
+		-- alongside a buffer that is demonstrably healthy again — caught
+		-- during the M3-8 failure drill, where a flush that had just landed
+		-- still showed `lastError = HttpError: ConnectFail` from the attempt
+		-- before it.
+		metrics.lastError = ""
 	else
 		metrics.failed += 1
 		metrics.lastError = lastError

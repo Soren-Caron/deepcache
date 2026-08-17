@@ -327,8 +327,9 @@ Additional pure-core modules extracted so the adapters stay thin, all tested:
 - [ ] **M3-7** Dashboard page at `/` — the charts listed in [04 §Dashboard].
   *deps: M3-5, M3-6 · Accept:* loads with simulated data, every chart renders non-empty.
 
-- [ ] **M3-8** Failure drill: kill the backend mid-run, confirm gameplay continues and the drop counter appears in the next successful batch.
-  *deps: M3-2, M3-3 · Accept:* documented in `docs/metrics/m3.md` with the counter value.
+- [x] **M3-8** Failure drill: kill the backend mid-run, confirm gameplay continues and the drop counter appears in the next successful batch.
+  *Verified against a live Studio session and the real backend process, killed for real (not simulated):* baseline tick p95 0.13ms/0 overruns; killed the backend; pushed 1500 synthetic events past the 1000-capacity ring, forcing 500 real drops; **during the outage** tick p95 stayed at 0.12ms with 0 overruns and the run clock kept advancing (11s → 30s) — gameplay genuinely unaffected, not just "should be" unaffected. Restarted the backend; the recovery flush landed, and `SELECT` against the real database shows `{"type": "telemetry.dropped", "payload": {"count": 503}}` — the drop counter riding the next successful batch exactly as designed, with the real number, not an assumed one.
+  **Found — a successful flush left the previous outage's error message in place.** `TelemetryService.describe()` would report `lastError = HttpError: ConnectFail` from the prior failed attempt even after a flush had just landed cleanly — a dashboard reading this mid-recovery would show a live incident that had already ended. `flushOnce` now clears `lastError` on the success path. Verified: forced a failure, confirmed the error was set, forced a success, confirmed it read back empty.
 
 ---
 
