@@ -272,10 +272,17 @@ Additional pure-core modules extracted so the adapters stay thin, all tested:
   **Added — `seq` is assigned on push, not on flush.** The rollup worker detects loss by comparing max `seq` against event count, so numbering at flush time would renumber around a gap and hide exactly what it exists to reveal. A test asserts the gap survives: after 10 pushes into a 4-slot ring, the batch reads seq 7–10 with `dropped = 6`.
   **Added — `drain`/`commit`/`requeue` split.** The drop counter clears on `commit`, not `drain`, so a batch that fails to post can be retried without losing the count; `requeue` puts a failed batch back ahead of newer events and stays bounded when retries pile up.
   **Added — `Ring.shift`** for FIFO drain. The history buffer only ever reads by age, but draining oldest-first into a batch then clearing would lose anything pushed in between.
-  *Remaining:* the `TelemetryService` adapter (emit sites, HTTP batching, retry) — it needs the ingest endpoint from M3-3.
+  *Adapter done* — `server/services/TelemetryService.luau`: NDJSON serialisation, HMAC-signed POST, the documented 1/2/4/8 s backoff, a circuit breaker, and a `BindToClose` flush with a 3 s grace.
+  **Added — `core/telemetry/Hmac.luau`,** SHA-256 and HMAC-SHA256 in pure Luau. Roblox has no hashing primitive and docs/04 requires both a signed batch and a pseudonymous `pid = HMAC(userId, salt)`. Verified against the NIST vectors (empty, `abc`, 56-byte, 112-byte, one million `a`) and RFC 4231 cases 1, 2, 3, 6, 7, plus two values cross-checked against .NET. **Never against itself:** a self-consistently wrong hash would verify every signature locally and none on the backend, and would present as a network fault.
+  **Added — a circuit breaker.** `HttpService` allows 500 requests/minute per server; a backend that is down must not spend that budget rediscovering the fact. Three consecutive failed flushes open it for 60 s.
+  **Divergence — a failed batch is requeued, not dropped.** docs/04 says drop after four attempts. `Buffer.requeue` is already bounded and drops the oldest when full, so keeping the events costs nothing the ring was not going to cost anyway, and a transient outage stops being data loss.
+  **Found while measuring — `queued` read zero during a retry.** The retry ladder takes 15 s, and for that whole window the ring is empty while the batch sits in limbo: a dashboard would have shown a healthy `queued = 0` with 200 events unaccounted for. Added a separate `inFlight` counter.
+  *Verified in Studio with the backend deliberately down:* `HttpError: ConnectFail`, failures climbing 2 → 3, the breaker opening for 60 s, and **`dropped = 0`** — nothing lost while unreachable. That is most of M3-8's failure drill, ahead of schedule.
 
-- [ ] **M3-2** Emit every event in the [04 §Event catalogue] from its owning service.
-  *deps: M3-1, M2-7 · Accept:* Studio — a full run produces at least one of each event type; assert in the smoke script.
+- [~] **M3-2** Emit every event in the [04 §Event catalogue] from its owning service.
+  *Emitting:* `run.start`, `run.end`, `player.death`, `extract.success`, `loot.pickup`, `loot.drop`, `perf.tick`, `telemetry.dropped`, `server.shutdown`.
+  *Remaining:* `combat.fire` / `combat.hit` (needs the M2-5 weapon adapter), `player.spawn`, `extract.attempt`, `objective.*` and `director.*` (M4), `economy.txn` and `market.*` (M6), `anticheat.flag`.
+  **Note on `perf.tick`:** sampled every 30 s, not per tick. A per-tick event would be twenty events a second describing the cost of emitting events.
 
 - [ ] **M3-3** Backend `/v1/ingest` — NDJSON, HMAC verify, per-line validation, partial-batch accept, `(run_id, server_id, seq)` dedupe.
   *deps: M0-6 · Accept:* vitest — valid batch, malformed line rejected while siblings commit, replayed batch inserts zero rows, 10k lines < 500 ms.

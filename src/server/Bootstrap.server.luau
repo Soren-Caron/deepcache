@@ -22,6 +22,7 @@ local Types = require(Shared.core.Types)
 local Remotes = require(Shared.net.Remotes)
 
 local TickService = require("./services/TickService")
+local TelemetryService = require("./services/TelemetryService")
 local LevelService = require("./services/LevelService")
 local LootService = require("./services/LootService")
 local RunLifecycleService = require("./services/RunLifecycleService")
@@ -58,6 +59,10 @@ end
 
 local function main()
 	Remotes.init()
+
+	-- Telemetry starts before anything that emits, so no event is lost to a
+	-- buffer that did not exist yet.
+	TelemetryService.start()
 
 	-- The level exists before anything that spawns into it. M2-7 takes over
 	-- seed selection when the run lifecycle lands; until then every boot builds
@@ -97,6 +102,26 @@ local function main()
 	TickService.addPhase("replication", ReplicationService.step)
 
 	RunLifecycleService.start(Rooms.defaultSeed)
+
+	-- perf.tick is one of the two events docs/04 calls first-class, because it
+	-- is what makes the netcode claims checkable against real sessions rather
+	-- than against a bench. Sampled every 30s: a per-tick event would be 20
+	-- times a second of telemetry describing telemetry.
+	task.spawn(function()
+		while true do
+			task.wait(30)
+			local stats = TickService.getStats()
+			TelemetryService.emit("perf.tick", {
+				p50 = stats.p50,
+				p95 = stats.p95,
+				p99 = stats.p99,
+				overruns = stats.overruns,
+				ticks = stats.ticks,
+				entityCount = EntityService.count(),
+			})
+			TickService.resetStats()
+		end
+	end)
 
 	-- Diagnostics must be registered from this context: the command bar has its
 	-- own module registry and would otherwise see fresh, idle service instances.
@@ -293,6 +318,11 @@ local function main()
 		return rows
 	end)
 	Diagnostics.register("runInfo", RunLifecycleService.describe)
+	Diagnostics.register("telemetryInfo", TelemetryService.describe)
+	Diagnostics.register("telemetryFlush", function()
+		local landed = TelemetryService.flushOnce(true)
+		return { landed = landed, state = TelemetryService.describe() }
+	end)
 
 	-- M2-7 acceptance: drive a whole run without waiting twelve real minutes.
 	-- Fast-forwards the clock a chunk at a time and reports what fired.

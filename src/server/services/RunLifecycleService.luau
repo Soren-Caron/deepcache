@@ -14,6 +14,7 @@
 	at a pad from across the map.
 ]]
 
+local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 
@@ -25,6 +26,7 @@ local Remotes = require(Shared.net.Remotes)
 
 local LevelService = require("./LevelService")
 local LootService = require("./LootService")
+local TelemetryService = require("./TelemetryService")
 
 local RunLifecycleService = {}
 
@@ -110,6 +112,22 @@ function RunLifecycleService.start(seed: number)
 	sincePush = 0
 
 	LootService.populate(seed)
+
+	-- A run id that is unique per run and reproducible in a report: the seed
+	-- alone would collide across servers, and a GUID alone would not tell you
+	-- which level to rebuild.
+	local runId = `{seed}-{HttpService:GenerateGUID(false)}`
+	TelemetryService.setRun(runId)
+	TelemetryService.emit("run.start", {
+		seed = seed,
+		squadSize = #ids,
+		lengthSeconds = Branding.runLengthSeconds,
+		layout = if LevelService.getLayout() then {
+			modules = #(LevelService.getLayout() :: any).modules,
+			totalArea = (LevelService.getLayout() :: any).totalArea,
+		} else nil,
+	})
+
 	fireAll({ kind = "runStarted", seed = seed, lengthSeconds = Branding.runLengthSeconds })
 end
 
@@ -139,6 +157,11 @@ function RunLifecycleService.onDeath(player: Player)
 	local droppedValue = LootService.scatter(player.UserId, position)
 	local died = Run.kill(current, player.UserId)
 	if died then
+		TelemetryService.emit("player.death", {
+			tSeconds = current.elapsedSeconds,
+			droppedValue = droppedValue,
+			position = { x = math.floor(position.x), z = math.floor(position.z) },
+		}, player.UserId)
 		fireAll({ kind = "playerDied", playerId = player.UserId, droppedValue = droppedValue })
 	end
 end
@@ -183,6 +206,11 @@ local function tryExtractions()
 				-- Hand the items over too, or the extracted player keeps the
 				-- movement penalty and could bank the same loot at a second pad.
 				LootService.bank(player.UserId)
+				TelemetryService.emit("extract.success", {
+					zone = pad.zone,
+					tSeconds = current.elapsedSeconds,
+					carriedValue = banked,
+				}, player.UserId)
 				fireAll({
 					kind = "playerExtracted",
 					playerId = player.UserId,
@@ -238,7 +266,19 @@ function RunLifecycleService.step(tick: number, dt: number)
 			end
 			fireAll({ kind = "playerDied", playerId = event.playerId, droppedValue = event.droppedValue })
 		elseif event.kind == "runEnded" then
-			fireAll({ kind = "runEnded", reason = event.reason, summary = Run.summary(current) })
+			local summary = Run.summary(current)
+			TelemetryService.emit("run.end", {
+				outcome = event.reason,
+				durationSeconds = current.elapsedSeconds,
+				extracted = summary.extracted,
+				deaths = summary.died,
+				valueExtracted = summary.bankedValue,
+				squadSize = current.startingHeadcount,
+			})
+			-- The run is over; get its events out before anything else can
+			-- interrupt, rather than waiting for the next 1s flush tick.
+			task.spawn(TelemetryService.flushOnce, true)
+			fireAll({ kind = "runEnded", reason = event.reason, summary = summary })
 		end
 	end
 

@@ -25,6 +25,7 @@ local ZonesConfig = require(Shared.config.Zones)
 local Remotes = require(Shared.net.Remotes)
 
 local LevelService = require("./LevelService")
+local TelemetryService = require("./TelemetryService")
 
 local LootService = {}
 
@@ -244,6 +245,15 @@ function LootService.tryPickup(player: Player, uid: unknown): (boolean, string?)
 	end
 	table.insert(list, item)
 	pushCarry(player)
+
+	local def = (LootConfig.items :: any)[item.itemId]
+	TelemetryService.emit("loot.pickup", {
+		itemId = item.itemId,
+		rarity = def and def.rarity or "unknown",
+		weight = item.weight,
+		value = item.value,
+		totalWeight = totalWeight(player.UserId),
+	}, player.UserId)
 	return true, nil
 end
 
@@ -277,6 +287,14 @@ function LootService.tryDrop(player: Player, uid: unknown): (boolean, string?)
 			local placed = Loot.place(store, item.itemId, item.weight, item.value, at, currentTick, player.UserId)
 			makeInstance(placed)
 			pushCarry(player)
+
+			local def = (LootConfig.items :: any)[item.itemId]
+			TelemetryService.emit("loot.drop", {
+				itemId = item.itemId,
+				rarity = def and def.rarity or "unknown",
+				weight = item.weight,
+				totalWeight = totalWeight(player.UserId),
+			}, player.UserId)
 			return true, nil
 		end
 	end
