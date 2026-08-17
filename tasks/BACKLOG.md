@@ -222,8 +222,23 @@ Additional pure-core modules extracted so the adapters stay thin, all tested:
   Every tier lands on the exact multiple of the 16-stud base. The reach rule is checked server-side against the item's recorded position: a `ProximityPrompt` is client-side convenience, not a security boundary.
   **Found in Studio — extraction did not clear the carry.** `Run.tryExtract` zeroed the run's ledger while `LootService` still held the items, so an extracted player kept the movement penalty, kept reporting 91 kg to the enemy budget, and could have banked the same loot at a second pad. Added `LootService.bank`, distinct from the `scatter` death path.
 
-- [ ] **M2-5** Remaining three weapons. Slug as a server-simulated projectile entity; Arc as per-tick continuous validation.
-  *Pure core done* — `core/sim/Ballistics`: Arc ramp curve (compounding, capped, decays faster than it builds) and Slug travel/drop (3.11 studs over 120 studs at 180 studs/s, g=14), with the closed form pinned against the integration step the server ticks. *Remaining:* the CombatService adapter — burst validation, the projectile entity, and per-tick beam contact.
+- [x] **M2-5** Remaining three weapons. Slug as a server-simulated projectile entity; Arc as per-tick continuous validation.
+  *Pure core* — `core/sim/Ballistics`: Arc ramp (compounding, capped, decaying faster than it builds) and Slug travel/drop (3.11 studs over 120 at 180 studs/s, g=14), closed form pinned against the integration step the server ticks.
+  *Adapter verified in Studio:*
+
+  ```
+  Sidearm  hitscan     3 req at 16.9 studs ->   66.0 damage   (22 x 3, exact)
+  Carbine  hitscan     3 req at 16.9 studs ->   51.0 damage   (17 x 3, exact)
+  Slug     projectile  3 req at 16.9 studs ->  136.0 damage   (68 x 2 landed)
+  Arc      beam       40 req at 16.9 studs ->  156.2 damage   (ramped)
+  requests=49 hits=48 rejectedRate=1
+  ```
+
+  **Fixed — the Carbine could not fire its own burst.** The rate bucket held 2 tokens while the weapon fires 3-round bursts faster than its sustained rate, so the third round of every burst was rejected as a rate violation. Capacity now covers `burst`. The exact 51 = 17 × 3 above is that fix.
+  **Divergence — projectile and beam skip lag compensation, deliberately.** A Slug is an object in the world, so a hit is decided by where the projectile *is*, not by rewinding to where a target *was*; an Arc is contact evaluated this tick. Rewinding either answers a question nobody asked. Only hitscan rewinds.
+  **Added — a shared `damageEntity` path** for all three, so falloff, headshot and the Warden shield cannot drift between weapons. Beams take no headshot multiplier: a bonus flickering as the beam drifts across a hitbox is noise, not skill.
+  **Added — `CombatService.submit`,** so diagnostics probes travel the identical queue/rate/ammo/rewind path a real request does. A probe that bypassed the queue would be testing a path no player can reach.
+  **Found while measuring — the probe was shooting a wall.** The first run read 0 damage for both hitscan weapons and looked like a broken adapter. The trace ring said `wall=25.4 (Modules.001_Junction_Cross.Wall_N_Solid)`: the target spawned 40 studs away, through the room's north wall, and the wall check was doing its job. Slug and Arc appeared to "work" only because the Hauler walked closer during their longer probes. The probe now measures the clear distance first. This is exactly the failure the M1 trace ring was added for — every metric read clean because no rule had rejected anything.
 
 - [x] **M2-7** `RunLifecycleService` — 12:00 timer, pad open schedule, extraction, death, individual extraction.
   *Renamed* from `RunService_`: the trailing underscore existed only to dodge the clash with Roblox's `RunService`, and a descriptive name does that better.
@@ -280,8 +295,8 @@ Additional pure-core modules extracted so the adapters stay thin, all tested:
   *Verified in Studio with the backend deliberately down:* `HttpError: ConnectFail`, failures climbing 2 → 3, the breaker opening for 60 s, and **`dropped = 0`** — nothing lost while unreachable. That is most of M3-8's failure drill, ahead of schedule.
 
 - [~] **M3-2** Emit every event in the [04 §Event catalogue] from its owning service.
-  *Emitting:* `run.start`, `run.end`, `player.death`, `extract.success`, `loot.pickup`, `loot.drop`, `perf.tick`, `telemetry.dropped`, `server.shutdown`.
-  *Remaining:* `combat.fire` / `combat.hit` (needs the M2-5 weapon adapter), `player.spawn`, `extract.attempt`, `objective.*` and `director.*` (M4), `economy.txn` and `market.*` (M6), `anticheat.flag`.
+  *Emitting:* `run.start`, `run.end`, `player.death`, `extract.success`, `loot.pickup`, `loot.drop`, `combat.fire`, `combat.hit`, `perf.tick`, `telemetry.dropped`, `server.shutdown`.
+  *Remaining:* `player.spawn`, `extract.attempt`, `objective.*` and `director.*` (M4), `economy.txn` and `market.*` (M6), `anticheat.flag`. The assertion that a full run produces one of each cannot be written until those exist.
   **Note on `perf.tick`:** sampled every 30 s, not per tick. A per-tick event would be twenty events a second describing the cost of emitting events.
 
 - [ ] **M3-3** Backend `/v1/ingest` — NDJSON, HMAC verify, per-line validation, partial-batch accept, `(run_id, server_id, seq)` dedupe.

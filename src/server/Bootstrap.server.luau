@@ -20,6 +20,7 @@ local Branding = require(Shared.config.Branding)
 local Rooms = require(Shared.config.Rooms)
 local Types = require(Shared.core.Types)
 local Remotes = require(Shared.net.Remotes)
+local Wire = require(Shared.net.Wire)
 
 local TickService = require("./services/TickService")
 local TelemetryService = require("./services/TelemetryService")
@@ -479,6 +480,79 @@ local function main()
 		end
 		carriedWeight[player.UserId] = weight
 		return `carried weight for {player.Name} set to {weight}`
+	end)
+
+	-- M2-5 acceptance: all four weapons fire and deal damage, each through its
+	-- own netcode path. Spawns a fresh target per weapon at a fixed distance so
+	-- the numbers are comparable, and reports what actually landed.
+	Diagnostics.register("weaponProbe", function(distance: number?)
+		local player = Players:GetPlayers()[1]
+		local character = player and player.Character
+		local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+		if rootPart == nil then
+			return { error = "no character" }
+		end
+
+		local range = distance or 40
+		local rows: { string } = {}
+
+		for _, weaponId in { "Sidearm", "Carbine", "Slug", "Arc" } do
+			local weapon = (require(Shared.config.Weapons) :: any)[weaponId]
+			local origin = rootPart.Position + Vector3.new(0, 2, 0)
+
+			-- Place the target where it can actually be shot. The level is a
+			-- real building: a target at a fixed 40 studs lands behind the
+			-- room's wall, every hitscan shot correctly stops on the wall, and
+			-- the probe reads as "the weapon is broken" when the weapon is
+			-- fine. Measure the clear distance first.
+			local params = RaycastParams.new()
+			params.FilterType = Enum.RaycastFilterType.Exclude
+			params.FilterDescendantsInstances = { character }
+			local blocked = workspace:Raycast(origin, Vector3.new(0, 0, range + 10), params)
+			local clear = if blocked then math.max(8, blocked.Distance - 6) else range
+			local target = origin + Vector3.new(0, 0, math.min(range, clear))
+
+			-- A Hauler: big enough to hit reliably, tough enough to survive a
+			-- burst so the damage total is readable rather than clipped.
+			local entity = EntityService.spawn("Hauler", Wire.toVec3(target), TickService.getTick())
+			local before = entity.hp
+			CombatService.reload(player, weaponId)
+
+			-- Let the entity age into the rewind buffer and out of `spawn`
+			-- state. Hitscan resolves against history, so an entity fired at on
+			-- the tick it spawned is genuinely not there yet to be hit — the
+			-- projectile and beam paths read the present and would hit it.
+			task.wait(0.4)
+
+			-- Enough requests to show a burst, a projectile flight, or a ramp.
+			local shots = if weapon.kind == "beam" then 40 else 3
+			for _ = 1, shots do
+				CombatService.submit(player, {
+					seq = 0,
+					clientTime = TickService.now(),
+					origin = origin,
+					direction = Vector3.new(0, 0, 1),
+					weaponId = weaponId,
+				})
+				task.wait(if weapon.kind == "beam" then 0.05 else 0.35)
+			end
+			-- Let a projectile finish its flight.
+			task.wait(0.6)
+
+			local live = EntityService.get(entity.id)
+			local after = if live then live.hp else 0
+			rows[#rows + 1] = string.format(
+				"%-8s %-10s %2d req at %4.1f studs -> %6.1f damage (hp %5.0f -> %5.0f)%s",
+				weaponId, weapon.kind, shots, (target - origin).Magnitude, before - after, before, after,
+				if live == nil then "  TARGET DIED" else ""
+			)
+			if live then
+				EntityService.remove(entity.id)
+			end
+		end
+
+		rows[#rows + 1] = string.format("projectiles still in flight: %d", CombatService.projectileCount())
+		return rows
 	end)
 
 	Diagnostics.register("movementMetrics", MovementGuardService.getMetrics)
