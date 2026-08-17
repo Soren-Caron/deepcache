@@ -5,12 +5,13 @@
  *             during a Postgres outage. That is deliberate: the game degrades
  *             gracefully without the database, so a DB outage is not a reason
  *             to have the orchestrator restart a working process.
- * /readyz   — are dependencies reachable? Gains a real DB probe at M3.
+ * /readyz   — are dependencies reachable? Real `SELECT 1` against Postgres.
  * /metrics  — Prometheus text format.
  */
 
 import type { FastifyInstance } from "fastify";
 import { API_VERSION } from "../app.js";
+import { checkConnection } from "../db.js";
 
 export async function registerHealthRoutes(app: FastifyInstance): Promise<void> {
   app.get("/healthz", async () => ({
@@ -20,9 +21,9 @@ export async function registerHealthRoutes(app: FastifyInstance): Promise<void> 
   }));
 
   app.get("/readyz", async (_request, reply) => {
+    const dbOk = await checkConnection(app.config);
     const checks: Record<string, "ok" | "unchecked" | "failed"> = {
-      // M3 replaces this with a real `SELECT 1`.
-      database: "unchecked",
+      database: dbOk ? "ok" : "failed",
     };
     const failed = Object.values(checks).some((v) => v === "failed");
     return reply.code(failed ? 503 : 200).send({

@@ -114,10 +114,25 @@ CREATE TABLE events (
   payload     JSONB        NOT NULL,
   ingested_at TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
+CREATE UNIQUE INDEX ON events (run_id, server_id, seq);
 CREATE INDEX ON events (run_id);
 CREATE INDEX ON events (type, ts DESC);
 CREATE INDEX ON events (pid, ts DESC) WHERE pid IS NOT NULL;
+```
 
+**As built (M3-3):** the unique index above was not in the original draft of this
+schema. `/v1/ingest`'s acceptance criterion is that a replayed batch — the game
+server retrying a POST it never got an ack for — inserts zero new rows, and
+that is a database guarantee, not application logic: the insert is a single
+bulk `INSERT ... ON CONFLICT (run_id, server_id, seq) DO NOTHING`, so a replay
+racing a fresh batch from the same server cannot double-insert between a
+SELECT and an INSERT the way a check-then-insert in application code could.
+The response distinguishes three outcomes rather than the two sketched above —
+`{ accepted, rejected, duplicates }`. A replayed event is neither new data nor
+malformed input; folding it into either bucket would make either dedupe or
+data loss invisible in the response.
+
+```sql
 -- Rollups, rebuilt by workers. Safe to drop and regenerate from events.
 CREATE TABLE run_summary (
   run_id TEXT PRIMARY KEY, started_at TIMESTAMPTZ, duration_s REAL,

@@ -7,7 +7,9 @@
 
 import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
 import type { Config } from "./config.js";
+import { closePool } from "./db.js";
 import { registerHealthRoutes } from "./routes/health.js";
+import { registerIngestRoute } from "./routes/ingest.js";
 
 export const API_VERSION = "0.1.0";
 
@@ -29,6 +31,14 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
   app.decorate("startedAt", Date.now());
 
   await app.register(registerHealthRoutes);
+  await app.register(registerIngestRoute);
+
+  // The pool is a module-level singleton, not a Fastify-owned resource, so it
+  // needs an explicit hook or `app.close()` leaves connections open and the
+  // process (or a vitest run) hangs on exit.
+  app.addHook("onClose", async () => {
+    await closePool();
+  });
 
   app.setNotFoundHandler((request, reply) => {
     void reply.code(404).send({

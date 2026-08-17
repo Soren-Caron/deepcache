@@ -5,6 +5,22 @@
  * 500s on the first real request is worse than one that refuses to start.
  */
 
+import { config as loadDotenv } from "dotenv";
+
+// Loaded here, once, rather than requiring every entry point (index.ts,
+// migrate.ts, the test suite) to remember `import "dotenv/config"` first.
+// `.env` only fills in variables not already set, so an explicitly exported
+// shell var or a CI secret still wins over the file.
+//
+// Found the hard way: this project ran for a while with a committed
+// backend/.env that nothing was reading, so the server was silently signing
+// with the code's built-in fallback secret instead of the value in the file
+// -- which would have matched the game server's Backend.luau secret only by
+// coincidence. A signature mismatch from this looks exactly like a network
+// failure, not an auth bug, which is the failure mode this file's HMAC
+// sibling was already written to avoid.
+loadDotenv();
+
 export interface Config {
   readonly port: number;
   readonly host: string;
