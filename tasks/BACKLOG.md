@@ -321,8 +321,26 @@ Additional pure-core modules extracted so the adapters stay thin, all tested:
   **One transaction covers both upserts,** so a dashboard read landing mid-rollup can never see a `run_summary` row without its `player_stats` siblings reflecting the same snapshot of events.
   *Not wired into a live server yet:* `startRollupWorker` runs the documented 60s interval from `index.ts`, but nothing has driven real traffic through a running server long enough to observe it — that lands with M3-6/M3-7.
 
-- [ ] **M3-6** `sim/` run simulator with the five archetypes.
-  *deps: M3-3 · Accept:* `npm --prefix sim run generate -- --runs 2000 --days 30` completes; ingest reports 2000 `run.end` rows.
+- [x] **M3-6** `sim/` run simulator with the five archetypes.
+  *Verified against the real live backend, the real live Postgres, the real ingest and rollup code — no mocks anywhere in this path:*
+
+  ```
+  npm --prefix sim run generate -- --runs 2000 --days 30
+  generating 2000 runs across 30 days (seed 1) -> http://127.0.0.1:8787
+  done in 34.8s, 80 batch(es): accepted=859660 rejected=0 duplicates=0
+
+  SELECT count(*) FROM events WHERE type = 'run.end' AND run_id LIKE 'sim-1-%';
+   count
+  -------
+    2000
+  ```
+
+  **Exactly 2000 `run.end` rows** — the documented acceptance criterion, matched exactly, not approximately. 859,660 total events across 8 real event types (`combat.fire` 533k, `combat.hit` 281k, `loot.pickup` 30k, `perf.tick` 5.9k, `extract.success` 2990, `player.death` 2065, `run.end`/`run.start` 2000 each).
+  **A full rollup pass over the resulting ~890k-row table took 939 ms**, producing 2025 `run_summary` rows and 303 `player_stats` rows — comfortably inside the documented 60 s worker interval, and the first time the rollup worker has run against volume rather than a handful of hand-inserted test rows.
+  **Five archetypes** (`cautious`, `looter`, `aggressive`, `average`, `reckless`), each a distribution over fire rate, accuracy, weapon preference, and — the one docs/01 cares about most — how much weight they're willing to carry before the risk of not making it back scales up. `looter`'s extraction chance is designed to be undercut by its own greed cap, not by enemy difficulty: the same tension the real game's weight table exists to create.
+  **Loot events use the real item catalogue** (`sim/src/items.ts` mirrors `config/Loot.luau`'s ids, weights, and rarity multipliers) rather than synthetic placeholder items, so `loot.pickup` payloads describe the same economy the real game does.
+  **Deterministic:** `--seed` reproduces byte-identical output, verified directly (`generateRun` called twice with the same seed, `toEqual` on the full event array) — the same property the game's own `core/util/Rng` guarantees, for the same reason: a simulator that cannot reproduce the exact run that caused a dashboard bug is not useful for debugging one.
+  **Found by actually running it, not by inspecting the payload shape:** the first invocation rejected ~78% of lines (4781 of 6075). The envelope shape was fine — every line passed the real backend validator when checked directly — the bug was in the simulator's batching, not the payload: it mixed events from many different simulated `serverId`s into one HTTP POST, and `/v1/ingest` correctly rejects a batch that does not share one `serverId`, on the reasonable assumption that nothing upstream merges two servers' telemetry into one flush. Fixed by assigning every run to a server up front and flushing per server — which is also the more honest simulation, since a real game server only ever flushes its own buffer.
 
 - [ ] **M3-7** Dashboard page at `/` — the charts listed in [04 §Dashboard].
   *deps: M3-5, M3-6 · Accept:* loads with simulated data, every chart renders non-empty.
