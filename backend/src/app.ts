@@ -8,6 +8,7 @@
 import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
 import type { Config } from "./config.js";
 import { closePool } from "./db.js";
+import { registerDashboardRoutes } from "./routes/dashboard.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerIngestRoute } from "./routes/ingest.js";
 
@@ -32,6 +33,7 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
 
   await app.register(registerHealthRoutes);
   await app.register(registerIngestRoute);
+  await app.register(registerDashboardRoutes);
 
   // The pool is a module-level singleton, not a Fastify-owned resource, so it
   // needs an explicit hook or `app.close()` leaves connections open and the

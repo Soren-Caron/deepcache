@@ -174,9 +174,9 @@ Run on intervals inside the same process (a real deployment would separate them;
 
 ### Dashboard
 
-A single static page served at `/` reading `/metrics` and a few JSON endpoints. Charts: tick time p95 over time, snapshot bandwidth, hit-registration latency histogram, director latency and fallback rate, sink/faucet ratio with the multiplier overlaid, matchmaking wait-time distribution.
+A single static page served at `/`, server-rendered from `run_summary`, `player_stats`, and `events` directly (not `/metrics`, which is Prometheus text for scrape, not for a human page). Six charts were originally specified here as if all six ship at M3. In practice, at M3 only two have a real source event: tick time p95 (`perf.tick`) and hit-registration latency (`combat.fire.rttMs`). The other four each need an event type this milestone doesn't produce — `director.decision` (M4), `economy.txn`/`economy_daily` (M6), a matchmaking wait-time event (M5, not yet even named), and snapshot bandwidth (unscheduled — `ReplicationService` doesn't emit telemetry). Rather than fabricate numbers to make all six "render non-empty," the four without a source render an explicit placeholder naming the event type and milestone that will populate them. A dashboard that quietly invented data to look finished would be a worse artifact than one that says what it does not know yet.
 
-This is not a nice-to-have. It is the artifact that turns "I built systems" into "here is what they did." Build it at M3, not at the end.
+This is not a nice-to-have. It is the artifact that turns "I built systems" into "here is what they did." Build it at M3, not at the end — and let it visibly grow honest charts as M4/M5/M6 land, rather than presenting six charts of unknown provenance from day one.
 
 ## Failure behavior, stated explicitly
 
