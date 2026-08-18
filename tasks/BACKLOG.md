@@ -409,8 +409,12 @@ Additional pure-core modules extracted so the adapters stay thin, all tested:
 - [ ] **M4-9** Comms HUD panel + threat-tier → lighting hook.
   *deps: M4-7 · Accept:* Studio — barks appear, threat tier 5 visibly shifts the post stack.
 
-- [ ] **M4-10** A/B assignment by `hash(runId)`, arm recorded in `run.start`.
+- [x] **M4-10** A/B assignment by `hash(runId)`, arm recorded in `run.start`.
   *deps: M4-6, M3-2 · Accept:* over 1,000 simulated runs, arm split within 48–52%.
+  `core/director/AbTest.luau` (pure): reuses the already-tested `core/telemetry/Hmac.sha256` rather than a second hash implementation — the last hex digit of `sha256(runId)` is uniform over 0-15, split at 8. Deterministic from `runId` alone, so a logged run's arm is reproducible without having recorded it separately.
+  4 tests including the literal accept criterion — 1,000 simulated runIds, real measured split **A=484 B=516 (48.4%)**, inside the 48-52% window. `lune run tests`: 519 passed, up from 515.
+  Wired end to end: `RunLifecycleService.start()` computes the arm once from `runId` and includes it in `run.start` telemetry; `DirectorService` reads `RunLifecycleService.getArm()` each tick and returns before ever calling the backend when arm is `"A"` — not a disabled feature, the control condition docs/05 §Evaluating the director specifies (`Clamp.apply(nil, fsmDecision, bounds)` already made the tick's decision the pure FSM baseline before this check even runs).
+  **Verified end to end in Studio and real Postgres, not just at the pure-function level:** for the live run, `AbTest.assignArm(runId)` recomputed independently matched the arm actually driving call behavior (calls were incrementing — arm B), and `SELECT payload->>'arm' FROM events WHERE type='run.start'` against the real database returned `B`, matching exactly. Tick stats unaffected: 0 overruns, p95 0.14ms across 1,108 ticks.
 
 - [ ] **M4-11** Director metrics on the dashboard — latency, fallback rate, cost/run, A/B comparison.
   *deps: M4-10, M3-7 · Accept:* charts render; fallback rate reads < 3% over 200 runs.

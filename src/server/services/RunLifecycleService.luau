@@ -18,6 +18,7 @@ local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 
+local AbTest = require(Shared.core.director.AbTest)
 local Run = require(Shared.core.sim.Run)
 local Types = require(Shared.core.Types)
 local Branding = require(Shared.config.Branding)
@@ -40,6 +41,8 @@ local state: Run.RunState? = nil
 local schedule: Run.PadSchedule = {}
 local sincePush = 0
 local diedConnections: { [number]: RBXScriptConnection } = {}
+--- M4-10: which A/B arm this run is on. nil before a run has started.
+local arm: AbTest.Arm? = nil
 
 local function fireAll(payload: { [string]: any })
 	Remotes.event("RunEvent"):FireAllClients(payload)
@@ -118,10 +121,16 @@ function RunLifecycleService.start(seed: number)
 	-- which level to rebuild.
 	local runId = `{seed}-{HttpService:GenerateGUID(false)}`
 	TelemetryService.setRun(runId)
+
+	-- M4-10: decided once, from runId alone, so it's reproducible from a
+	-- logged run without having recorded the arm separately.
+	arm = AbTest.assignArm(runId)
+
 	TelemetryService.emit("run.start", {
 		seed = seed,
 		squadSize = #ids,
 		lengthSeconds = Branding.runLengthSeconds,
+		arm = arm,
 		layout = if LevelService.getLayout() then {
 			modules = #(LevelService.getLayout() :: any).modules,
 			totalArea = (LevelService.getLayout() :: any).totalArea,
@@ -133,6 +142,12 @@ end
 
 function RunLifecycleService.getState(): Run.RunState?
 	return state
+end
+
+--- M4-10: nil before any run has started. Arm A (control) is FSM-only --
+--- DirectorService reads this to decide whether to call the backend at all.
+function RunLifecycleService.getArm(): AbTest.Arm?
+	return arm
 end
 
 --- Whether a player may still pick things up. LootService asks this so a dead

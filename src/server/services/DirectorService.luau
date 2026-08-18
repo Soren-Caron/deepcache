@@ -314,6 +314,7 @@ function DirectorService.tick()
 		filteredBark = filterBark(bark, intent, requestingUserId)
 	end)
 
+	local arm = RunLifecycleService.getArm()
 	TelemetryService.emit("director.decision", {
 		intent = decision.intent,
 		spawnMultiplier = decision.spawnMultiplier,
@@ -324,7 +325,16 @@ function DirectorService.tick()
 		latencyMs = metrics.lastLatencyMs,
 		model = metrics.lastModel,
 		promptVersion = metrics.lastPromptVersion,
+		arm = arm,
 	})
+
+	-- M4-10: arm A is FSM-only, docs/05 §Evaluating the director. Not
+	-- calling the backend at all is the control condition, not a disabled
+	-- feature -- Clamp.apply(nil, ...) above already made this tick's
+	-- decision the pure FSM baseline, exactly as arm A specifies.
+	if arm == "A" then
+		return
+	end
 
 	if inFlight then
 		metrics.skipped += 1
