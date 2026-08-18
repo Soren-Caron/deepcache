@@ -1,18 +1,22 @@
 /**
- * M3-7. A single static page at `/`, reading a small JSON API, no external
- * CDN dependency -- consistent with docs/04's "runs entirely locally, zero
- * external accounts" posture for the rest of the stack. Charts are hand-drawn
- * inline SVG, not a charting library.
+ * M3-7/M4-11. A single static page at `/`, reading a small JSON API, no
+ * external CDN dependency -- consistent with docs/04's "runs entirely
+ * locally, zero external accounts" posture for the rest of the stack.
+ * Charts are hand-drawn inline SVG, not a charting library.
  *
- * docs/04 names six charts. Two have a real source event today: tick p95
- * (`perf.tick`) and hit-registration latency (`combat.fire.rttMs`). The other
- * four need event types that do not exist yet -- `director.decision` is M4,
- * `economy.txn`/`economy_daily` is M6, matchmaking wait time is M5. Rather
- * than fabricate numbers to satisfy "every chart renders non-empty" as
- * originally written, those four render an explicit "not yet emitted"
- * placeholder naming the milestone that adds them. A dashboard that quietly
- * invented data to look finished would be a worse artifact than one that
- * says what it does not know yet.
+ * docs/04 names six charts. Three have a real source event now: tick p95
+ * (`perf.tick`), hit-registration latency (`combat.fire.rttMs`), and
+ * director latency/fallback rate (`director.decision`, M4). The other two
+ * need event types that do not exist yet -- `economy.txn`/`economy_daily`
+ * is M6, matchmaking wait time is M5. Rather than fabricate numbers to
+ * satisfy "every chart renders non-empty" as originally written, those
+ * render an explicit "not yet emitted" placeholder naming the milestone
+ * that adds them. A dashboard that quietly invented data to look finished
+ * would be a worse artifact than one that says what it does not know yet.
+ *
+ * "Cost/run" (M4-11's original wording) is $0 after the one-time hardware
+ * cost -- OVERSEER runs on self-hosted Ollama, not a metered API. Shown as
+ * that fact, not a fabricated dollar figure. See CLAUDE.md §Model choices.
  */
 
 import type { FastifyInstance } from "fastify";
@@ -44,11 +48,26 @@ interface PlayerAggregate {
   avgDeaths: number | null;
 }
 
+interface ArmStats {
+  decisions: number;
+  fallbackRate: number | null;
+}
+
+interface DirectorAggregate {
+  totalDecisions: number;
+  avgLatencyMs: number | null;
+  p95LatencyMs: number | null;
+  fallbackRate: number | null;
+  armA: ArmStats;
+  armB: ArmStats;
+}
+
 export interface DashboardData {
   tickP95: TickPoint[];
   hitLatencyHistogram: HistogramBucket[];
   runs: RunAggregate;
   players: PlayerAggregate;
+  director: DirectorAggregate;
   notYetEmitted: Array<{ chart: string; milestone: string; eventType: string }>;
 }
 
@@ -115,6 +134,38 @@ async function fetchDashboardData(app: FastifyInstance): Promise<DashboardData> 
   `);
   const r = runRow.rows[0];
 
+  const directorRow = await pool.query<{
+    total: string;
+    fallbacks: string;
+    // avg() returns NUMERIC (string); percentile_cont returns double
+    // precision, which pg parses as a real number already -- verified
+    // directly rather than assumed, see docs/metrics/m4.md.
+    avg_latency: string | null;
+    p95_latency: number | null;
+    arm_a_total: string;
+    arm_a_fallbacks: string;
+    arm_b_total: string;
+    arm_b_fallbacks: string;
+  }>(`
+    SELECT
+      count(*)::text AS total,
+      count(*) FILTER (WHERE (payload->>'fallbackUsed')::boolean)::text AS fallbacks,
+      avg((payload->>'latencyMs')::float) AS avg_latency,
+      percentile_cont(0.95) WITHIN GROUP (ORDER BY (payload->>'latencyMs')::float) AS p95_latency,
+      count(*) FILTER (WHERE payload->>'arm' = 'A')::text AS arm_a_total,
+      count(*) FILTER (WHERE payload->>'arm' = 'A' AND (payload->>'fallbackUsed')::boolean)::text AS arm_a_fallbacks,
+      count(*) FILTER (WHERE payload->>'arm' = 'B')::text AS arm_b_total,
+      count(*) FILTER (WHERE payload->>'arm' = 'B' AND (payload->>'fallbackUsed')::boolean)::text AS arm_b_fallbacks
+    FROM events
+    WHERE type = 'director.decision'
+  `);
+  const d = directorRow.rows[0];
+  const armStats = (total: string | undefined, fallbacks: string | undefined): ArmStats => {
+    const totalN = Number(total ?? 0);
+    const fallbacksN = Number(fallbacks ?? 0);
+    return { decisions: totalN, fallbackRate: totalN > 0 ? fallbacksN / totalN : null };
+  };
+
   const playerRow = await pool.query<{
     total_players: string;
     avg_runs: string | null;
@@ -144,8 +195,16 @@ async function fetchDashboardData(app: FastifyInstance): Promise<DashboardData> 
       avgExtracts: p?.avg_extracts === null || p?.avg_extracts === undefined ? null : Number(p.avg_extracts),
       avgDeaths: p?.avg_deaths === null || p?.avg_deaths === undefined ? null : Number(p.avg_deaths),
     },
+    director: {
+      totalDecisions: Number(d?.total ?? 0),
+      avgLatencyMs: d?.avg_latency === null || d?.avg_latency === undefined ? null : Number(d.avg_latency),
+      p95LatencyMs: d?.p95_latency ?? null,
+      fallbackRate:
+        Number(d?.total ?? 0) > 0 ? Number(d?.fallbacks ?? 0) / Number(d?.total ?? 0) : null,
+      armA: armStats(d?.arm_a_total, d?.arm_a_fallbacks),
+      armB: armStats(d?.arm_b_total, d?.arm_b_fallbacks),
+    },
     notYetEmitted: [
-      { chart: "Director latency and fallback rate", milestone: "M4", eventType: "director.decision" },
       { chart: "Sink/faucet ratio with multiplier overlay", milestone: "M6", eventType: "economy.txn / economy_daily" },
       { chart: "Matchmaking wait-time distribution", milestone: "M5", eventType: "queue.wait (not yet defined)" },
       { chart: "Snapshot bandwidth", milestone: "unscheduled", eventType: "ReplicationService does not emit telemetry yet" },
@@ -192,6 +251,7 @@ function renderPage(data: DashboardData): string {
     .join("\n");
 
   const fmt = (n: number | null, digits = 0): string => (n === null ? "—" : n.toFixed(digits));
+  const fmtPct = (n: number | null): string => (n === null ? "—" : `${(n * 100).toFixed(1)}%`);
 
   return `<!doctype html>
 <html lang="en">
@@ -266,6 +326,24 @@ function renderPage(data: DashboardData): string {
         data.hitLatencyHistogram.every((b) => b.count === 0)
           ? '<p class="empty">No combat.fire events yet.</p>'
           : `<svg viewBox="0 0 780 170">${histBars}</svg>`
+      }
+    </div>
+
+    <div class="card">
+      <h3>Director (OVERSEER) — latency, fallback rate, A/B</h3>
+      ${
+        data.director.totalDecisions === 0
+          ? '<p class="empty">No director.decision events yet.</p>'
+          : `<div class="stat-row">
+              <div class="stat"><div class="value">${data.director.totalDecisions}</div><div class="label">decisions</div></div>
+              <div class="stat"><div class="value">${fmt(data.director.avgLatencyMs, 0)}ms</div><div class="label">avg latency</div></div>
+              <div class="stat"><div class="value">${fmt(data.director.p95LatencyMs, 0)}ms</div><div class="label">p95 latency</div></div>
+              <div class="stat"><div class="value">${fmtPct(data.director.fallbackRate)}</div><div class="label">fallback rate</div></div>
+              <div class="stat"><div class="value">$0</div><div class="label">cost / run (self-hosted)</div></div>
+            </div>
+            <p class="empty">A/B — arm A (FSM only): ${data.director.armA.decisions} decisions.
+              Arm B (FSM + OVERSEER): ${data.director.armB.decisions} decisions,
+              ${fmtPct(data.director.armB.fallbackRate)} fallback.</p>`
       }
     </div>
 

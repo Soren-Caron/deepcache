@@ -50,6 +50,25 @@ beforeAll(async () => {
   await insertEvent("combat.fire", tickDayEpoch, { rttMs: 37 }, 2); // 0-50ms
   await insertEvent("combat.fire", tickDayEpoch, { rttMs: 275 }, 3); // 250-300ms
   await insertEvent("combat.fire", tickDayEpoch, { rttMs: 999 }, 4); // overflow (400ms+)
+  // M4-11: one fallback decision, one successful one, on each arm.
+  await insertEvent(
+    "director.decision",
+    tickDayEpoch,
+    { intent: "hold_steady", latencyMs: 1200, fallbackUsed: true, arm: "B" },
+    5,
+  );
+  await insertEvent(
+    "director.decision",
+    tickDayEpoch,
+    { intent: "escalate", latencyMs: 900, fallbackUsed: false, arm: "B" },
+    6,
+  );
+  await insertEvent(
+    "director.decision",
+    tickDayEpoch,
+    { intent: "hold_steady", latencyMs: 0, fallbackUsed: false, arm: "A" },
+    7,
+  );
 });
 
 afterAll(async () => {
@@ -69,12 +88,11 @@ describe("GET /v1/dashboard/data", () => {
     expect(Array.isArray(data.notYetEmitted)).toBe(true);
   });
 
-  it("names the exact four charts with no real data source yet", async () => {
+  it("names the exact three charts with no real data source yet (director landed at M4)", async () => {
     const res = await app.inject({ method: "GET", url: "/v1/dashboard/data" });
     const data = res.json() as DashboardData;
 
     expect(data.notYetEmitted).toEqual([
-      { chart: "Director latency and fallback rate", milestone: "M4", eventType: "director.decision" },
       {
         chart: "Sink/faucet ratio with multiplier overlay",
         milestone: "M6",
@@ -91,6 +109,22 @@ describe("GET /v1/dashboard/data", () => {
         eventType: "ReplicationService does not emit telemetry yet",
       },
     ]);
+  });
+
+  it("aggregates director.decision into latency, fallback rate, and an A/B split", async () => {
+    const res = await app.inject({ method: "GET", url: "/v1/dashboard/data" });
+    const data = res.json() as DashboardData;
+
+    // No run_id scope on this query (matches runs/players aggregates), so
+    // exact totals aren't assertable -- only that this suite's own inserted
+    // rows are reflected in plausible, correctly-typed aggregate values.
+    expect(data.director.totalDecisions).toBeGreaterThanOrEqual(3);
+    expect(typeof data.director.avgLatencyMs).toBe("number");
+    expect(typeof data.director.p95LatencyMs).toBe("number");
+    expect(data.director.fallbackRate).toBeGreaterThan(0);
+    expect(data.director.fallbackRate).toBeLessThanOrEqual(1);
+    expect(data.director.armA.decisions).toBeGreaterThanOrEqual(1);
+    expect(data.director.armB.decisions).toBeGreaterThanOrEqual(2);
   });
 
   it("aggregates perf.tick into a day-bucketed p95 series", async () => {
@@ -126,9 +160,17 @@ describe("GET /", () => {
 
   it("shows named placeholders instead of fabricated numbers for unimplemented charts", async () => {
     const res = await app.inject({ method: "GET", url: "/" });
-    expect(res.body).toContain("Director latency and fallback rate");
-    expect(res.body).toContain("director.decision");
+    expect(res.body).toContain("Sink/faucet ratio with multiplier overlay");
+    expect(res.body).toContain("economy.txn");
     expect(res.body).toContain("No data yet");
+  });
+
+  it("renders real director metrics, not a placeholder, now that M4 has landed", async () => {
+    const res = await app.inject({ method: "GET", url: "/" });
+    expect(res.body).toContain("Director (OVERSEER)");
+    expect(res.body).not.toContain("Director latency and fallback rate");
+    expect(res.body).toContain("fallback rate");
+    expect(res.body).toContain("cost / run");
   });
 
   it("renders the real tick and latency charts as inline SVG", async () => {
