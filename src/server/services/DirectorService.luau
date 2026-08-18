@@ -46,6 +46,7 @@ local ObjectivesCore = require(Shared.core.director.Objectives)
 local Schema = require(Shared.core.director.Schema)
 local CannedBarks = require(Shared.config.CannedBarks)
 local ObjectivesConfig = require(Shared.config.Objectives)
+local Remotes = require(Shared.net.Remotes)
 
 local BackendConfig = require("../config/Backend")
 local CombatService = require("./CombatService")
@@ -309,9 +310,18 @@ function DirectorService.tick()
 	-- never happen on the tick path itself -- docs/05 §Content filtering.
 	local bark = decision.bark
 	local intent = decision.intent
+	local threatTier = decision.threatTier
 	local requestingUserId = hostUserId()
 	task.spawn(function()
 		filteredBark = filterBark(bark, intent, requestingUserId)
+		-- M4-9: broadcast only after filtering resolves -- a client must
+		-- never see the pre-filter bark, even briefly.
+		Remotes.event("RunEvent"):FireAllClients({
+			kind = "overseerBark",
+			bark = filteredBark,
+			intent = intent,
+			threatTier = threatTier,
+		})
 	end)
 
 	local arm = RunLifecycleService.getArm()
