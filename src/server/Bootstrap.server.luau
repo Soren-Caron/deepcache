@@ -32,6 +32,7 @@ local ReplicationService = require("./services/ReplicationService")
 local CombatService = require("./services/CombatService")
 local MovementGuardService = require("./services/MovementGuardService")
 local DirectorService = require("./services/DirectorService")
+local QueueService = require("./services/QueueService")
 local Diagnostics = require("./services/Diagnostics")
 local TickBench = require("./smoke/TickBench")
 
@@ -362,6 +363,34 @@ local function main()
 	-- confirm a canned line comes back, never the raw text.
 	Diagnostics.register("directorForceFilterBark", function(rawBark: string?, intent: string?, userId: number?)
 		return DirectorService.forceFilterBark(rawBark or "raw unfiltered text", intent or "hold_steady", userId or 0)
+	end)
+
+	-- M5-4 acceptance: two coordinators racing to claim the same queue
+	-- entry -- exactly one must win. Both "coordinators" are real,
+	-- independent calls into the real MemoryStoreSortedMap; nothing here
+	-- is simulated except that they run in one process instead of two.
+	Diagnostics.register("queueClaimRace", function(bucket: number, pid: string, rating: number)
+		QueueService.join(bucket, pid, rating, os.time(), 60)
+		local resultA = QueueService.tryClaim(bucket, pid)
+		local resultB = QueueService.tryClaim(bucket, pid)
+		return { firstClaim = resultA, secondClaim = resultB, exactlyOneWon = (resultA ~= resultB) }
+	end)
+
+	Diagnostics.register("queueJoinLeave", function(bucket: number, pid: string, rating: number)
+		local joined = QueueService.join(bucket, pid, rating, os.time(), 60)
+		local listed = QueueService.listBucket(bucket, 50)
+		local left = QueueService.leave(bucket, pid)
+		local listedAfter = QueueService.listBucket(bucket, 50)
+		return { joined = joined, listedCount = #listed, left = left, listedAfterCount = #listedAfter }
+	end)
+
+	-- M5-5 acceptance: kill the coordinator (stop renewing), confirm
+	-- another instance takes over once the real 10s lease expires.
+	Diagnostics.register("coordinatorTryBecome", function(instanceId: string)
+		return { became = QueueService.tryBecomeCoordinator(instanceId), current = QueueService.currentCoordinator() }
+	end)
+	Diagnostics.register("coordinatorCurrent", function()
+		return QueueService.currentCoordinator()
 	end)
 
 	-- M2-7 acceptance: drive a whole run without waiting twelve real minutes.
