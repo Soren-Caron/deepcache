@@ -35,11 +35,13 @@
 
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
+local TextService = game:GetService("TextService")
 local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 
 local Clamp = require(Shared.core.director.Clamp)
 local Fsm = require(Shared.core.director.Fsm)
 local Schema = require(Shared.core.director.Schema)
+local CannedBarks = require(Shared.config.CannedBarks)
 
 local BackendConfig = require("../config/Backend")
 local CombatService = require("./CombatService")
@@ -66,6 +68,11 @@ local consecutiveFailures = 0
 local breakerOpenUntil = 0
 
 local history: { string } = {}
+--- The filtered, display-ready bark. Never the raw `currentDecision.bark`
+--- directly -- that has been sanitised of control characters by Clamp, but
+--- never content-filtered, and docs/05 §Content filtering is explicit that
+--- no unfiltered model text may reach a player under any circumstance.
+local filteredBark = ""
 
 local metrics = {
 	calls = 0,
@@ -96,6 +103,45 @@ local function squadHpFraction(): number
 		return 1
 	end
 	return total / count
+end
+
+local function pickCannedBark(intent: string): string
+	local pool = CannedBarks[intent] or CannedBarks.hold_steady
+	if pool == nil or #pool == 0 then
+		return "..."
+	end
+	return pool[math.random(1, #pool)]
+end
+
+--- The requesting user for FilterStringAsync -- docs/05: "use the run's
+--- host player." Nothing elsewhere in this codebase tracks a designated
+--- host, so the first connected player stands in for it. Returns 0 (an
+--- id no real player can have) if nobody is connected, which correctly
+--- forces FilterStringAsync to fail rather than silently skip filtering.
+local function hostUserId(): number
+	local first = Players:GetPlayers()[1]
+	return if first then first.UserId else 0
+end
+
+--- Never returns unfiltered text. Both TextService calls are pcall-wrapped
+--- per docs/05 §Content filtering; either one failing falls back to a
+--- canned line for the same intent, not to the raw bark.
+local function filterBark(rawBark: string, intent: string, requestingUserId: number): string
+	local filterOk, filterResult = pcall(function()
+		return TextService:FilterStringAsync(rawBark, requestingUserId, Enum.TextFilterContext.PublicChat)
+	end)
+	if not filterOk then
+		return pickCannedBark(intent)
+	end
+
+	local broadcastOk, display = pcall(function()
+		return (filterResult :: TextFilterResult):GetNonChatStringForBroadcastAsync()
+	end)
+	if not broadcastOk then
+		return pickCannedBark(intent)
+	end
+
+	return display :: string
 end
 
 --- Runs `fn` on its own thread and waits up to `timeoutSeconds` for it.
@@ -229,6 +275,15 @@ function DirectorService.tick()
 	end
 	recordHistory(decision, elapsed)
 
+	-- Filtering yields (a real network-backed Roblox service call) and must
+	-- never happen on the tick path itself -- docs/05 §Content filtering.
+	local bark = decision.bark
+	local intent = decision.intent
+	local requestingUserId = hostUserId()
+	task.spawn(function()
+		filteredBark = filterBark(bark, intent, requestingUserId)
+	end)
+
 	TelemetryService.emit("director.decision", {
 		intent = decision.intent,
 		spawnMultiplier = decision.spawnMultiplier,
@@ -309,10 +364,26 @@ function DirectorService.getDecision(): Schema.DirectorDecision
 	return currentDecision
 end
 
+--- The filtered, display-ready bark -- what M4-9's HUD panel should read,
+--- never `getDecision().bark` directly.
+function DirectorService.getFilteredBark(): string
+	return filteredBark
+end
+
+--- M4-7 Studio smoke test hook: filters a bark synchronously (this yields,
+--- which a BindableFunction handler may do) and returns the result, so a
+--- diagnostics call can force a real failure (an invalid `requestingUserId`
+--- like 0 genuinely fails `FilterStringAsync`, no test-only mock needed)
+--- and assert a canned line came back instead of raw text.
+function DirectorService.forceFilterBark(rawBark: string, intent: string, requestingUserId: number): string
+	return filterBark(rawBark, intent, requestingUserId)
+end
+
 function DirectorService.describe(): { [string]: any }
 	return {
 		fsmState = context.state,
 		decision = currentDecision,
+		filteredBark = filteredBark,
 		calls = metrics.calls,
 		fallbacks = metrics.fallbacks,
 		skipped = metrics.skipped,

@@ -357,6 +357,13 @@ local function main()
 		return DirectorService.describe()
 	end)
 
+	-- M4-7 acceptance: force a real filter failure (userId 0 is not a real
+	-- player and genuinely fails FilterStringAsync -- no mock needed) and
+	-- confirm a canned line comes back, never the raw text.
+	Diagnostics.register("directorForceFilterBark", function(rawBark: string?, intent: string?, userId: number?)
+		return DirectorService.forceFilterBark(rawBark or "raw unfiltered text", intent or "hold_steady", userId or 0)
+	end)
+
 	-- M2-7 acceptance: drive a whole run without waiting twelve real minutes.
 	-- Fast-forwards the clock a chunk at a time and reports what fired.
 	Diagnostics.register("runProbe", function(stepSeconds: number?, steps: number?)
