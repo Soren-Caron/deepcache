@@ -1,6 +1,8 @@
 --!strict
---[[ M4-6. Drives the pacing FSM on the documented 20s director cadence and
-	layers OVERSEER's async proposal on top of it via Clamp.
+--[[ M4-6/M4-7/M4-8. Drives the pacing FSM on the documented 20s director
+	cadence, layers OVERSEER's async proposal on top of it via Clamp, filters
+	the resulting bark, and gates the resolved objective against cooldown
+	state (`core/director/Objectives`) before it is applied.
 
 	The FSM (`core/director/Fsm`) always runs and always produces a valid
 	decision — that is M2's exit criterion and it does not change here.
@@ -40,8 +42,10 @@ local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 
 local Clamp = require(Shared.core.director.Clamp)
 local Fsm = require(Shared.core.director.Fsm)
+local ObjectivesCore = require(Shared.core.director.Objectives)
 local Schema = require(Shared.core.director.Schema)
 local CannedBarks = require(Shared.config.CannedBarks)
+local ObjectivesConfig = require(Shared.config.Objectives)
 
 local BackendConfig = require("../config/Backend")
 local CombatService = require("./CombatService")
@@ -52,12 +56,20 @@ local TelemetryService = require("./TelemetryService")
 
 local DirectorService = {}
 
+--- Adapter owns the config -> core mapping; core cannot read config/ (see
+--- the M1-4/M2-8 precedent).
+local COOLDOWN_SECONDS_BY_ID: { [string]: number } = {}
+for id, spec in ObjectivesConfig :: { [string]: { cooldownSeconds: number } } do
+	COOLDOWN_SECONDS_BY_ID[id] = spec.cooldownSeconds
+end
+
 --- docs/05 §Cadence and latency.
 local TICK_INTERVAL_SECONDS = 20
 local HISTORY_SIZE = 5
 
 local context = Fsm.new()
 local currentDecision: Schema.DirectorDecision = context.lastDecision
+local objectiveState = ObjectivesCore.new(context.lastDecision.objective.id)
 local running = false
 local sinceFight = 0
 local lastHitCount = 0
@@ -269,6 +281,24 @@ function DirectorService.tick()
 	local fsmDecision = Fsm.step(context, input, TICK_INTERVAL_SECONDS)
 
 	local decision = Clamp.apply(proposal, fsmDecision, Schema.DEFAULT_BOUNDS)
+
+	-- Clamp already guarantees decision.objective.id is a real whitelist id
+	-- (M4-5's half of the split). This is the other half: is it available
+	-- *right now*, or still cooling down from having just been active.
+	local previousObjective = currentDecision.objective
+	local wasActive = objectiveState.activeId
+	local resolvedObjectiveId = ObjectivesCore.resolve(objectiveState, decision.objective.id, elapsed)
+	if resolvedObjectiveId ~= decision.objective.id then
+		-- Rejected: keep whatever was already active, params included -- an
+		-- objective in progress does not restart just because a competing
+		-- id was proposed and blocked by its own cooldown.
+		decision.objective = { id = resolvedObjectiveId, params = previousObjective.params }
+	end
+	ObjectivesCore.issue(objectiveState, resolvedObjectiveId, elapsed, COOLDOWN_SECONDS_BY_ID)
+	if resolvedObjectiveId ~= wasActive then
+		TelemetryService.emit("objective.issued", { id = resolvedObjectiveId, previousId = wasActive, tSeconds = elapsed })
+	end
+
 	currentDecision = decision
 	if proposal == nil then
 		metrics.fallbacks += 1
