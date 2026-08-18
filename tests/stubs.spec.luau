@@ -75,9 +75,6 @@ t.describe("core module surface", function()
 		expect(function()
 			modules.Ledger.new()
 		end).toThrow("unimplemented")
-		expect(function()
-			modules.Rating.new(0)
-		end).toThrow("unimplemented")
 	end)
 end)
 
@@ -112,11 +109,9 @@ end)
 -- director-schema.spec.luau and clamp.spec.luau. What remains in M4 is the
 -- backend LLM proxy and adapter code, verified via vitest and Studio.
 
-t.describe("M5 discovery", function()
-	t.todo("Rating: matches hand-computed values, rd shrink/grow")
-	t.todo("Bucket: widening boundaries, undersized start at 75s")
-	t.todo("Recommend: shrinkage suppresses rare pairs, cold start")
-end)
+-- M5 discovery pure core is complete: see rating.spec.luau, bucket.spec.luau,
+-- recommend.spec.luau. What remains in M5 is the lobby/queue adapter and
+-- backend recommender worker, verified via Studio and vitest respectively.
 
 t.describe("M6 economy", function()
 	t.todo("Ledger: duplicate idemKey no-op, balance = sum, no negatives")

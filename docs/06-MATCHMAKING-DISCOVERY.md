@@ -46,7 +46,7 @@ r'  = r + K(rd) * (actual - expected)
 rd' = shrink(rd) after each run, grow with time since last seen
 ```
 
-- New players start at `r = 1200, rd = 350` — high uncertainty means fast early movement and wide initial matching.
+- New players start at `r = 1500, rd = 350` — the real, standard Glicko starting values. **A three-way inconsistency, not a two-way one:** this doc *and* the original `core/discovery/Rating.luau` scaffold (both from the initial M0 scaffold, 2026-08-15) agreed on `r = 1200`; `backend/src/rollup.ts` (M3-5, 2026-08-17) diverged to `1500` two days later without reconciling back. 1200 is not a standard Glicko value anywhere in the literature; 1500 is. Resolved in favor of 1500 — the actual domain-correct value for a system that explicitly calls itself "Glicko-style" — rather than in favor of whichever artifact came first. Fixed here and in `Rating.luau`'s own constant to match the already-shipped, tested rollup seed. High uncertainty means fast early movement and wide initial matching.
 - `K(rd)` scales with deviation: uncertain players move fast, established players move slowly.
 - `rd` grows with inactivity, so a returning player re-calibrates instead of being stuck.
 
