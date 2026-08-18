@@ -14,7 +14,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "migrate": "tsx src/migrate.ts up",
-    "migrate:down": "tsx src/migrate.ts down"
+    "migrate:down": "tsx src/migrate.ts down",
+    "eval:recommend": "tsx src/evalRecommend.ts"
   },
   "dependencies": {
     "dotenv": "^17.4.2",
