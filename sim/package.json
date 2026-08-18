@@ -8,6 +8,7 @@
   },
   "scripts": {
     "generate": "tsx src/generate.ts",
+    "matchmaking": "tsx src/runMatchmakingSim.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"

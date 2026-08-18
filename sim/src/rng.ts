@@ -47,4 +47,18 @@ export class Rng {
     if (item === undefined) throw new Error("pick: unreachable index");
     return item;
   }
+
+  /** Standard normal (mean 0, stddev 1) via Box-Muller. */
+  nextGaussian(): number {
+    // nextFloat() can return exactly 0, which would make log(u1) = -Infinity.
+    const u1 = Math.max(this.nextFloat(), Number.EPSILON);
+    const u2 = this.nextFloat();
+    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  }
+
+  /** Exponential inter-arrival time for a Poisson process at `ratePerSecond`. */
+  nextExponential(ratePerSecond: number): number {
+    const u = Math.max(this.nextFloat(), Number.EPSILON);
+    return -Math.log(u) / ratePerSecond;
+  }
 }
