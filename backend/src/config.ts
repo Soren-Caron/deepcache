@@ -30,8 +30,12 @@ export interface Config {
   readonly ingestSecret: string;
   /** Salt for pseudonymising player IDs. Never leaves the backend. */
   readonly playerSalt: string;
-  /** Absent until M4; the director route checks for it at call time. */
-  readonly anthropicApiKey: string | undefined;
+  /** M4: OVERSEER runs on self-hosted Ollama, not a cloud API. See docs/05. */
+  readonly ollamaBaseUrl: string;
+  /** Small/fast model for the 20s director tick loop. */
+  readonly ollamaTickModel: string;
+  /** Larger model for the async pre-run briefing and post-run debrief. */
+  readonly ollamaBriefingModel: string;
 }
 
 function optional(name: string): string | undefined {
@@ -88,6 +92,8 @@ export function loadConfig(): Config {
     ),
     ingestSecret: ingestSecret ?? "dev-insecure-ingest-secret",
     playerSalt: playerSalt ?? "dev-insecure-player-salt",
-    anthropicApiKey: optional("ANTHROPIC_API_KEY"),
+    ollamaBaseUrl: withDefault("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+    ollamaTickModel: withDefault("OLLAMA_TICK_MODEL", "llama3.2:3b"),
+    ollamaBriefingModel: withDefault("OLLAMA_BRIEFING_MODEL", "llama3.1:8b"),
   };
 }

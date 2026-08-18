@@ -31,6 +31,7 @@ local EntityService = require("./services/EntityService")
 local ReplicationService = require("./services/ReplicationService")
 local CombatService = require("./services/CombatService")
 local MovementGuardService = require("./services/MovementGuardService")
+local DirectorService = require("./services/DirectorService")
 local Diagnostics = require("./services/Diagnostics")
 local TickBench = require("./smoke/TickBench")
 
@@ -79,6 +80,10 @@ local function main()
 	-- Loot asks the run whether a player may still carry, so a dead or
 	-- extracted player cannot keep looting.
 	LootService.setCarryPredicate(RunLifecycleService.isActive)
+
+	-- OVERSEER (M4): the FSM baseline runs regardless of backend
+	-- availability, per this file's own boot-order contract above.
+	DirectorService.start()
 
 	-- The guard has to use the same speed the movement code does. It defaulted
 	-- to a flat 16, which is merely lenient for a loaded player — but once
@@ -334,6 +339,22 @@ local function main()
 	Diagnostics.register("telemetryFlush", function()
 		local landed = TelemetryService.flushOnce(true)
 		return { landed = landed, state = TelemetryService.describe() }
+	end)
+
+	Diagnostics.register("directorInfo", DirectorService.describe)
+
+	-- M4-6 acceptance: force a tick synchronously (rather than waiting out the
+	-- real 20s cadence) and wait for its async backend call to resolve, so a
+	-- Studio smoke test can observe the real outcome -- FSM decision, whether
+	-- a proposal landed, breaker state -- without a 20-minute wait for enough
+	-- natural ticks to happen.
+	Diagnostics.register("directorForceTick", function(maxWaitSeconds: number?)
+		DirectorService.tick()
+		local deadline = os.clock() + (maxWaitSeconds or 3)
+		while DirectorService.describe().inFlight and os.clock() < deadline do
+			task.wait(0.05)
+		end
+		return DirectorService.describe()
 	end)
 
 	-- M2-7 acceptance: drive a whole run without waiting twelve real minutes.

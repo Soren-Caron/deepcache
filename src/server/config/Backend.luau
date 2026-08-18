@@ -17,6 +17,13 @@ return {
 	--- cannot, which is what M6-11 (deploy) exists to fix.
 	baseUrl = "http://127.0.0.1:8787",
 	ingestPath = "/v1/ingest",
+	directorPath = "/v1/director/tick",
+	--- Slack above the backend's own internal 1200ms Ollama timeout (M4-3),
+	--- not a repeat of that number: this covers network + JSON round trip on
+	--- top of a budget the backend has already enforced on its side. Not the
+	--- same knob as "should the tick budget itself be longer" -- that product
+	--- question is open, see docs/metrics/m4.md.
+	directorTimeoutSeconds = 1.6,
 
 	--- Shared with the backend's INGEST_SECRET.
 	sharedSecret = "dev-ingest-secret-change-me",
