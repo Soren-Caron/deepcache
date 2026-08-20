@@ -5,7 +5,12 @@
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { getPool } from "./db.js";
+import { callOllama } from "./llm/ollama.js";
+import { loadOverseerPrompt } from "./llm/prompt.js";
+import { DIRECTOR_JSON_SCHEMA } from "./llm/schema.js";
+import { warmUpModel } from "./llm/warmup.js";
 import { startRollupWorker } from "./rollup.js";
+import { TICK_KEEP_ALIVE } from "./routes/director.js";
 import { startRecommendWorker } from "./workers/recommend.js";
 
 async function main(): Promise<void> {
@@ -41,6 +46,22 @@ async function main(): Promise<void> {
     { port: config.port, host: config.host, env: config.nodeEnv },
     "deepcache backend listening",
   );
+
+  // Not awaited: warming can legitimately take ~20-40s from a genuinely cold
+  // model, and the backend must be serving ingest, dashboard, and recommend
+  // routes long before that finishes. Director ticks arriving mid-warm-up
+  // fall back to the FSM baseline exactly as they already do -- the point is
+  // only that they stop doing so permanently. See llm/warmup.ts for the
+  // measured cold-start trap this breaks.
+  void warmUpModel({
+    baseUrl: config.ollamaBaseUrl,
+    model: config.ollamaTickModel,
+    keepAlive: TICK_KEEP_ALIVE,
+    system: loadOverseerPrompt(),
+    jsonSchema: DIRECTOR_JSON_SCHEMA,
+    callOllama,
+    log: (event, message) => app.log.info(event, message),
+  });
 }
 
 main().catch((error: unknown) => {

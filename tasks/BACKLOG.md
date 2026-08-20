@@ -509,9 +509,27 @@ test that fails against the pre-audit code. Full write-up in
   from nothing for 5% of integer amounts; the fuzz test only checked item
   conservation, never currency, despite the accept criterion naming both.
 
+- **Director cold-start trap (M4):** `keep_alive` only takes effect on a
+  request Ollama *finishes*, but a tick is aborted at 1200ms and a cold load
+  takes far longer — so a cold model never loads, every tick fails
+  identically, and the director degrades to pure-FSM permanently with no path
+  back. Proven by measurement: three consecutive ticks against a cold model
+  all timed out and `/api/ps` still reported **no model loaded**. Fixed with
+  an out-of-band boot warm-up (`backend/src/llm/warmup.ts`, 90s deadline, not
+  awaited); the 1200ms tick budget is deliberately left strict. Verified: the
+  model pins in 2784ms and ticks then return real proposals at 1.03–1.06s.
+
 Two patterns worth carrying into M7: **guards that check NaN but not
 infinity** (three separate instances), and **test fixtures that make the
 wrong behaviour indistinguishable from the right one** (three more).
+
+Two non-bugs that cost real investigation time and are written up in
+[docs/metrics/m4.md](../docs/metrics/m4.md) so they don't again: a director
+that looks permanently broken is usually just **A/B arm A** (FSM-only by
+design — `describe()` now reports `arm` so this is legible), and
+`require`-ing a service from the MCP bridge returns a **fresh idle copy**,
+not the running one, so it answers a question about a different object
+(the module-registry caveat CLAUDE.md already warns about, hit anyway).
 
 ---
 

@@ -430,6 +430,7 @@ function DirectorService.forceFilterBark(rawBark: string, intent: string, reques
 end
 
 function DirectorService.describe(): { [string]: any }
+	local arm = RunLifecycleService.getArm()
 	return {
 		fsmState = context.state,
 		decision = currentDecision,
@@ -443,6 +444,16 @@ function DirectorService.describe(): { [string]: any }
 		lastPromptVersion = metrics.lastPromptVersion,
 		breakerOpenFor = math.max(0, breakerOpenUntil - now()),
 		inFlight = inFlight,
+		-- M4-10 arm, and the single most important field for reading the rest
+		-- of this table correctly. In arm A the backend is *deliberately*
+		-- never called, so `calls`, `lastError`, `lastModel` and
+		-- `lastLatencyMs` freeze at whatever they held beforehand while
+		-- `fallbacks` keeps climbing every tick. Without this field that
+		-- reads exactly like a director stuck timing out forever -- it cost a
+		-- real investigation during the M2-M6 audit pass before the arm was
+		-- identified from `director.decision` telemetry instead.
+		arm = arm,
+		backendCallsSuppressedByArm = arm == "A",
 	}
 end
 
