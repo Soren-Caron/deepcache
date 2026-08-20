@@ -73,7 +73,7 @@ t.describe("core module surface", function()
 
 	t.it("stubs fail loudly rather than returning nil", function()
 		expect(function()
-			modules.Ledger.new()
+			modules.TwoBoneIk.solve({ x = 0, y = 0, z = 0 }, { x = 1, y = 0, z = 0 }, 1, 1, { x = 0, y = 1, z = 0 })
 		end).toThrow("unimplemented")
 	end)
 end)
@@ -113,12 +113,6 @@ end)
 -- recommend.spec.luau. What remains in M5 is the lobby/queue adapter and
 -- backend recommender worker, verified via Studio and vitest respectively.
 
-t.describe("M6 economy", function()
-	t.todo("Ledger: duplicate idemKey no-op, balance = sum, no negatives")
-	t.todo("Controller: converges, daily cap, sample floor, clamps hold")
-	t.todo("Market: price-time priority, partial fills, self-trade rejected")
-	t.todo("Market: fuzz 100k orders conserves currency and items")
-end)
 
 t.describe("M7 presentation", function()
 	t.todo("TwoBoneIk: reachable / exact / unreachable / degenerate")

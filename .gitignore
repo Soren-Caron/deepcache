@@ -20,6 +20,9 @@ dist/
 /data/
 *.sqlite
 
+# Dev server logs (rojo serve / npm run dev, redirected to a file at setup)
+*.log
+
 # Editor
 .DS_Store
 Thumbs.db

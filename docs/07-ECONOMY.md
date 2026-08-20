@@ -147,10 +147,12 @@ Insurance uptake is the metric to watch. If it's near 100%, the premium is too c
 
 ## Metrics
 
+**Divergence, found by the M6-4 fuzz/convergence test (`tests/controller.spec.luau`), not fixed here:** the `< 14` days target below does not hold for the gains given in §The controller (`KP=0.35, KI=0.05`) together with the `MAX_DAILY_DELTA=0.03` rate cap. Measured, starting 30% away from target: the ratio does not settle into the ±0.05 band until **day 24**. The rate cap is the binding constraint, not the gains — 3%/day means at least 10 days just to physically close a 30-point multiplier gap, and integral windup during that forced climb causes overshoot that takes another ~10+ days to settle. Retuning the gains without a real population to validate against would be guessing, so the number below is left as the original target with this note rather than silently edited to match the measurement. See [tasks/BACKLOG.md](../tasks/BACKLOG.md) M6-4.
+
 | Metric | Target |
 |---|---|
 | Sink/faucet ratio (24h) | 0.85 ± 0.05 after convergence |
-| Days to converge from a 30% seeded imbalance (sim) | < 14 |
+| Days to converge from a 30% seeded imbalance (sim) | < 14 (not met by current defaults — see note above; measured 24) |
 | Ledger reconciliation mismatches | 0 |
 | Duplicate-grant attempts caught | tracked (nonzero is fine — it means the guard works) |
 | Median credit balance, p10/p90 | monitored for wealth-gap blowout |
