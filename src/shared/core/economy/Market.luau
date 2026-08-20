@@ -44,6 +44,27 @@
 	fine for the tested scale: the fuzz test's price generation is centered
 	tightly enough that most incoming orders cross immediately rather than
 	resting, so book depth per item stays small even after 100k orders.
+
+	**Money here is integral, and that is load-bearing.** The ledger stores
+	`delta`/`balance_after` as Postgres BIGINT (migrations/0002), so credits
+	are whole numbers end to end. Prices are therefore required to be
+	positive integers, and the fee is `floor(gross * FEE_RATE)` rather than
+	a float. The split a fill implies is exactly:
+
+	    gross          = price * quantity   -- what the buyer pays
+	    fee            = floor(gross * FEE_RATE)
+	    sellerProceeds = gross - fee        -- never computed as 0.95*gross
+
+	Deriving proceeds by subtraction instead of by its own multiplication is
+	the entire point: rounding a float fee and a float proceeds
+	independently into BIGINT does not conserve currency. At a 5% fee it
+	fails for every gross ending in a multiple of 10 -- gross=10 gives
+	fee=0.5 and proceeds=9.5, which round to 1 and 10, creating a credit
+	from nothing. That is currency inflation via rounding, found in an audit
+	pass; the accept criterion says this engine conserves currency *exactly*,
+	so the arithmetic is made exact here rather than left for M6-9's escrow
+	layer to get right by luck. `floor` (not `round`) on the fee also means
+	the fee never exceeds the stated 5%.
 ]]
 
 local Market = {}
@@ -91,11 +112,14 @@ end
 
 --- Reject self-trades and orders outside +/- PRICE_BAND of the 7-day VWAP.
 function Market.validate(book: OrderBook, incoming: Order): (boolean, string?)
-	if incoming.quantity <= 0 then
-		return false, "quantity_not_positive"
+	-- Integral, not merely positive: credits are BIGINT in the ledger, so a
+	-- fractional price would make `gross` fractional and no rounding of the
+	-- fee/proceeds split could conserve currency. See the header.
+	if incoming.quantity <= 0 or incoming.quantity ~= math.floor(incoming.quantity) then
+		return false, "quantity_not_positive_integer"
 	end
-	if incoming.price <= 0 then
-		return false, "price_not_positive"
+	if incoming.price <= 0 or incoming.price ~= math.floor(incoming.price) then
+		return false, "price_not_positive_integer"
 	end
 
 	local isBuy = incoming.side == "buy"
@@ -163,7 +187,10 @@ function Market.match(book: OrderBook, incoming: Order): (OrderBook, { Fill })
 		local availableAtBest = matched.quantity - matched.filled
 		local matchQty = math.min(remaining, availableAtBest)
 		local fillPrice = matched.price -- the resting (maker) order sets the price
-		local fee = fillPrice * matchQty * Market.FEE_RATE
+		-- Integral fee, floored. The seller's proceeds are `gross - fee`, never
+		-- a separately-rounded 0.95 * gross -- see the header for why that
+		-- distinction is what makes currency conserve exactly.
+		local fee = math.floor(fillPrice * matchQty * Market.FEE_RATE)
 
 		local buyOrder = if isBuy then incoming else matched
 		local sellOrder = if isBuy then matched else incoming

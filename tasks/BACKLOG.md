@@ -482,6 +482,39 @@ Additional pure-core modules extracted so the adapters stay thin, all tested:
 
 ---
 
+## M2–M6 audit pass
+
+Full read-through of M2–M6 after the fact, looking for defects a green suite
+doesn't catch. **Seven real bugs found and fixed**, each with a regression
+test that fails against the pre-audit code. Full write-up in
+[docs/metrics/m6.md](../docs/metrics/m6.md#m2m6-audit-pass); the short list:
+
+- **Ingest (M3):** `ts`/`seq` unbounded → `new Date()` `RangeError` and
+  `bigint` overflow → a single bad line 500'd the whole POST and destroyed
+  every valid sibling event in the batch.
+- **Clamp (M4):** `spawnPattern` fell back to the literal `"even"` instead of
+  the FSM baseline, so a malformed model field silently downgraded a
+  deliberate pacing decision. docs/05 specified the literal; both corrected.
+- **Quantize (M1/M2):** `inf % TAU` is NaN, so an infinite yaw slipped the
+  NaN guard and `buffer.writeu8` wrote it as `0` silently.
+- **MovementGuard (M1):** out-of-bounds overwrote a standing teleport
+  correction, so breaking two rules gave a *weaker* correction than one — a
+  repeatable teleport to the world boundary.
+- **FireValidation (M2):** infinite and overflowing aim vectors bypassed
+  `bad_direction` and reached raycasting as NaN / `(0,0,0)`.
+- **Ledger (M6):** `apply` returned `false` for both "duplicate" (treat as
+  success) and "insufficient funds" (must not be) — a caller following
+  docs/07 would hand over goods without taking currency.
+- **Market (M6):** float fees against a `BIGINT` currency create a credit
+  from nothing for 5% of integer amounts; the fuzz test only checked item
+  conservation, never currency, despite the accept criterion naming both.
+
+Two patterns worth carrying into M7: **guards that check NaN but not
+infinity** (three separate instances), and **test fixtures that make the
+wrong behaviour indistinguishable from the right one** (three more).
+
+---
+
 ## M6 — Economy
 
 - [x] **M6-1** `core/economy/Ledger.luau` — apply, idempotency set, deterministic key construction. *Accept:* test — duplicate key no-op; balance = sum over 10k entries; negative balance rejected.

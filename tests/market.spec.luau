@@ -116,11 +116,42 @@ t.describe("Market.match -- partial fills and resting remainder", function()
 		expect(newBook.bids[1].filled).toEqual(0)
 	end)
 
-	t.it("fee is exactly price * quantity * FEE_RATE", function()
+	t.it("fee is floor(price * quantity * FEE_RATE), an exact integer", function()
 		local book = Market.new()
 		book = (Market.match(book, order("a", "seller_a", "sell", 200, 3, 1)))
 		local _, fills = Market.match(book, order("buy1", "buyer", "buy", 200, 3, 2))
-		expect(fills[1].fee).approx(200 * 3 * Market.FEE_RATE, 1e-9)
+		expect(fills[1].fee).toEqual(math.floor(200 * 3 * Market.FEE_RATE))
+		expect(fills[1].fee).toEqual(30)
+	end)
+
+	-- Currency is BIGINT in the ledger (migrations/0002), so the fee must be a
+	-- whole number of credits and the seller's proceeds must be gross - fee.
+	-- Rounding a float fee and a float proceeds independently does not
+	-- conserve currency: at 5%, gross=10 gives fee=0.5 and proceeds=9.5, which
+	-- round to 1 and 10 and create a credit out of nothing.
+	t.it("fee is always integral, and gross splits exactly into fee + proceeds", function()
+		for gross = 1, 300 do
+			local fee = math.floor(gross * Market.FEE_RATE)
+			local proceeds = gross - fee
+			expect(fee).toEqual(math.floor(fee))
+			expect(proceeds).toEqual(math.floor(proceeds))
+			expect(fee + proceeds).toEqual(gross)
+			expect(fee <= gross * Market.FEE_RATE).toBeTruthy() -- floor never overcharges
+		end
+	end)
+
+	t.it("a fractional price is rejected, since credits are whole numbers", function()
+		local book = Market.new()
+		local ok, reason = Market.validate(book, order("o1", "alice", "sell", 99.5, 1, 1))
+		expect(ok).never().toBeTruthy()
+		expect(reason).toEqual("price_not_positive_integer")
+	end)
+
+	t.it("a fractional quantity is rejected", function()
+		local book = Market.new()
+		local ok, reason = Market.validate(book, order("o1", "alice", "sell", 100, 1.5, 1))
+		expect(ok).never().toBeTruthy()
+		expect(reason).toEqual("quantity_not_positive_integer")
 	end)
 end)
 
@@ -186,6 +217,7 @@ t.describe("Market fuzz: 100k random orders conserve items and currency exactly"
 		local everAccepted: { string } = {}
 
 		local acceptedCount, rejectedCount, cancelAttempts, cancelHits = 0, 0, 0, 0
+		local buyerPaidTotal, sellerReceivedTotal, feeSinkTotal = 0, 0, 0
 
 		local N = 100000
 		for i = 1, N do
@@ -211,7 +243,8 @@ t.describe("Market fuzz: 100k random orders conserve items and currency exactly"
 				-- +-10% jitter around the fixed fair value of 100, comfortably
 				-- inside the +-40% band, tuned so most orders cross immediately
 				-- and book depth per item stays small across 100k orders.
-				local price = 100 * (0.9 + Rng.nextNumber(rng) * 0.2)
+				-- Integral, because credits are integral (see Market's header).
+				local price = Rng.nextRange(rng, 90, 110)
 				local qty = Rng.nextRange(rng, 1, 20)
 				local incoming: Market.Order = {
 					id = id,
@@ -237,7 +270,26 @@ t.describe("Market fuzz: 100k random orders conserve items and currency exactly"
 					for _, f in fills do
 						expect(f.quantity > 0).toBeTruthy()
 						expect(f.buyerPid).never().toEqual(f.sellerPid)
-						expect(f.fee).approx(f.price * f.quantity * Market.FEE_RATE, 1e-6)
+						expect(f.fee).toEqual(math.floor(f.price * f.quantity * Market.FEE_RATE))
+
+						-- Currency conservation, per fill and in aggregate. The
+						-- accept criterion says this engine conserves currency
+						-- *exactly*, and only item quantities were being checked
+						-- before an audit pass added this.
+						local gross = f.price * f.quantity
+						local proceeds = gross - f.fee
+						expect(gross).toEqual(math.floor(gross)) -- whole credits
+						expect(f.fee).toEqual(math.floor(f.fee))
+						expect(proceeds).toEqual(math.floor(proceeds))
+						-- Nothing created, nothing destroyed: what the buyer pays
+						-- is exactly what the seller receives plus the fee sink.
+						expect(proceeds + f.fee).toEqual(gross)
+						expect(f.fee >= 0).toBeTruthy()
+						expect(proceeds >= 0).toBeTruthy()
+
+						buyerPaidTotal += gross
+						sellerReceivedTotal += proceeds
+						feeSinkTotal += f.fee
 
 						filledTotal[f.buyOrderId] = (filledTotal[f.buyOrderId] or 0) + f.quantity
 						filledTotal[f.sellOrderId] = (filledTotal[f.sellOrderId] or 0) + f.quantity
@@ -284,5 +336,12 @@ t.describe("Market fuzz: 100k random orders conserve items and currency exactly"
 		expect(acceptedCount > 50000).toBeTruthy() -- sanity: the run actually exercised matching at scale
 		expect(cancelHits > 0).toBeTruthy() -- sanity: cancel path was actually exercised
 		expect(restingCount + fullyFilledCount > 0).toBeTruthy()
+
+		-- Aggregate currency conservation across every fill in the run: every
+		-- credit a buyer paid arrived either at a seller or in the fee sink.
+		-- Exact equality, not approximate -- these are whole credits.
+		expect(buyerPaidTotal > 0).toBeTruthy() -- sanity: money actually moved
+		expect(sellerReceivedTotal + feeSinkTotal).toEqual(buyerPaidTotal)
+		expect(feeSinkTotal > 0).toBeTruthy() -- sanity: the fee sink actually ran
 	end)
 end)

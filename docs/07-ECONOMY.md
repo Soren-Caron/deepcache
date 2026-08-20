@@ -118,6 +118,20 @@ FILL: item → buyer, credits → seller minus 5% fee (a sink), both escrows rel
 CANCEL: escrow returns to owner, always available on unfilled orders
 ```
 
+**Credits are whole numbers, and the fee arithmetic has to respect that.**
+The ledger stores `delta` and `balance_after` as Postgres `BIGINT`, so prices
+are required to be positive integers and the fee is `floor(gross * 0.05)`.
+The seller's proceeds are `gross - fee` — derived by subtraction, never as a
+separately-rounded `0.95 * gross`. Rounding the two halves independently does
+not conserve currency: at a 5% fee, a gross of 10 gives `fee = 0.5` and
+`proceeds = 9.5`, which round to 1 and 10 and **create a credit from
+nothing**. That affects every gross ending in a multiple of 10 — 5% of all
+integer amounts. Found in the M2–M6 audit pass; the fuzz test now asserts
+aggregate currency conservation (`sellerReceived + fees == buyerPaid`,
+exactly) and not only item conservation, which is all it originally checked.
+`floor` rather than `round` on the fee also guarantees the house never takes
+more than the advertised 5%.
+
 `core/economy/Market.luau` is the matching engine, and it is pure:
 
 ```lua
