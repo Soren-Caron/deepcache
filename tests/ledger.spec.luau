@@ -29,10 +29,10 @@ t.describe("Ledger.apply", function()
 		expect(Ledger.balance(state, "p1")).toEqual(250)
 	end)
 
-	t.it("a retried idemKey is a no-op, not an error", function()
+	t.it("a retried idemKey is a no-op the caller can treat as success", function()
 		local state = Ledger.new()
 		local key = Ledger.makeKey("run1", "p1", "extract_payout", 1)
-		local _, first = Ledger.apply(state, {
+		local _, firstOk, firstStatus = Ledger.apply(state, {
 			pid = "p1",
 			delta = 250,
 			reason = "extract_payout",
@@ -40,7 +40,7 @@ t.describe("Ledger.apply", function()
 			idemKey = key,
 			ts = 0,
 		})
-		local _, second = Ledger.apply(state, {
+		local _, secondOk, secondStatus = Ledger.apply(state, {
 			pid = "p1",
 			delta = 250,
 			reason = "extract_payout",
@@ -48,8 +48,11 @@ t.describe("Ledger.apply", function()
 			idemKey = key,
 			ts = 1,
 		})
-		expect(first).toBeTruthy()
-		expect(second).never().toBeTruthy()
+		expect(firstOk).toBeTruthy()
+		expect(firstStatus).toEqual("applied")
+		-- A replay is success, not failure: the effect is already in the ledger.
+		expect(secondOk).toBeTruthy()
+		expect(secondStatus).toEqual("duplicate")
 		-- The retry did not double-apply.
 		expect(Ledger.balance(state, "p1")).toEqual(250)
 	end)
@@ -64,7 +67,7 @@ t.describe("Ledger.apply", function()
 			idemKey = Ledger.makeKey("run1", "p1", "extract_payout", 1),
 			ts = 0,
 		})
-		local _, applied = Ledger.apply(state, {
+		local _, ok, status = Ledger.apply(state, {
 			pid = "p1",
 			delta = -150,
 			reason = "market_purchase",
@@ -72,9 +75,50 @@ t.describe("Ledger.apply", function()
 			idemKey = Ledger.makeKey("run1", "p1", "market_purchase", 2),
 			ts = 1,
 		})
-		expect(applied).never().toBeTruthy()
+		expect(ok).never().toBeTruthy()
+		expect(status).toEqual("insufficient_funds")
 		-- Rejected, so balance is untouched at 100, not clamped to 0.
 		expect(Ledger.balance(state, "p1")).toEqual(100)
+	end)
+
+	-- The distinction this test exists to pin down is the whole reason `apply`
+	-- returns a status rather than a bare boolean. docs/07 tells callers to
+	-- treat a duplicate as success and ignore it. If a *rejected* purchase
+	-- were reported the same way, a caller following that rule would hand over
+	-- the goods without ever taking the currency -- the duplicate-grant bug
+	-- this module exists to prevent, arriving through the error path.
+	t.it("a rejection is distinguishable from a duplicate", function()
+		local state = Ledger.new()
+		local key = Ledger.makeKey("run1", "p1", "extract_payout", 1)
+		Ledger.apply(state, {
+			pid = "p1",
+			delta = 100,
+			reason = "extract_payout",
+			runId = "run1",
+			idemKey = key,
+			ts = 0,
+		})
+
+		local _, dupOk, dupStatus = Ledger.apply(state, {
+			pid = "p1",
+			delta = 100,
+			reason = "extract_payout",
+			runId = "run1",
+			idemKey = key,
+			ts = 1,
+		})
+		local _, rejectOk, rejectStatus = Ledger.apply(state, {
+			pid = "p1",
+			delta = -9999,
+			reason = "market_purchase",
+			runId = "run1",
+			idemKey = Ledger.makeKey("run1", "p1", "market_purchase", 2),
+			ts = 2,
+		})
+
+		expect(dupStatus).never().toEqual(rejectStatus)
+		expect(dupOk).toBeTruthy()
+		expect(rejectOk).never().toBeTruthy()
 	end)
 
 	t.it("a rejected idemKey is not marked seen -- a corrected retry can still land", function()

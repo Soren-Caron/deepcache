@@ -47,6 +47,16 @@ export type LedgerState = {
 	entries: { Entry },
 }
 
+--- Why `apply` did what it did.
+---   `applied`             — new entry, balance moved.
+---   `duplicate`           — idemKey already seen; no change. The caller must
+---                           treat this as SUCCESS (docs/07): the effect is
+---                           already in the ledger, this is a retry landing.
+---   `insufficient_funds`  — rejected; no change. The caller must treat this
+---                           as FAILURE and must NOT deliver whatever the
+---                           entry was paying for.
+export type ApplyStatus = "applied" | "duplicate" | "insufficient_funds"
+
 local FAUCETS: { Reason } = { "extract_payout", "objective_bonus", "daily_first", "insurance_claim", "market_sale" }
 local SINKS: { Reason } =
 	{ "repair", "ammo", "insurance_premium", "market_fee", "market_purchase", "cosmetic" }
@@ -71,24 +81,36 @@ function Ledger.new(): LedgerState
 	}
 end
 
---- Apply an entry. Returns `applied = false` when idemKey was already seen —
---- that is a successful no-op, not an error. Rejects entries that would drive
---- a balance negative.
-function Ledger.apply(state: LedgerState, entry: Entry): (LedgerState, boolean)
+--- Apply an entry.
+---
+--- Returns `(state, ok, status)`. `ok` answers the only question a caller
+--- actually needs — "is this entry's effect accounted for in the ledger?" —
+--- and is true for both a fresh apply and a duplicate. `status` says which.
+---
+--- **Why `ok` is not the same as "the balance changed":** docs/07 specifies
+--- that a duplicate idemKey is a success the caller ignores, and separately
+--- that a negative balance is rejected. A single boolean cannot carry both,
+--- and collapsing them is dangerous in exactly one direction: a caller told
+--- `false` for a rejected purchase would follow docs/07's "treat false as
+--- success" rule and hand over the goods without ever taking the currency.
+--- That is the duplicate-grant bug this whole module exists to prevent,
+--- arriving through the error path instead. So the *rejection* gets the
+--- distinct value, and `status` disambiguates the rest.
+function Ledger.apply(state: LedgerState, entry: Entry): (LedgerState, boolean, ApplyStatus)
 	if state.seenKeys[entry.idemKey] then
-		return state, false
+		return state, true, "duplicate"
 	end
 
 	local newBalance = (state.balances[entry.pid] or 0) + entry.delta
 	if newBalance < 0 then
-		return state, false
+		return state, false, "insufficient_funds"
 	end
 
 	state.seenKeys[entry.idemKey] = true
 	state.balances[entry.pid] = newBalance
 	table.insert(state.entries, entry)
 
-	return state, true
+	return state, true, "applied"
 end
 
 function Ledger.balance(state: LedgerState, pid: string): number

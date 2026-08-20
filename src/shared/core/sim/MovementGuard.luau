@@ -140,10 +140,19 @@ function MovementGuard.check(
 			state.score += 2
 			state.totalViolations += 1
 			table.insert(reasons, "out_of_bounds")
+			-- Clamp whatever correction is already standing, NOT newPos. If a
+			-- teleport or speed violation already fired, `corrected` is
+			-- previousPos and must stay there: clamping newPos instead would
+			-- hand a cheater the boundary point, which is a successful
+			-- long-distance teleport earned by breaking two rules at once
+			-- rather than one. Only when this is the sole violation does the
+			-- clamped new position become the correction, since then there is
+			-- no safer place to fall back to.
+			local base = corrected or newPos
 			corrected = {
-				x = math.clamp(newPos.x, min.x, max.x),
-				y = math.clamp(newPos.y, min.y, max.y),
-				z = math.clamp(newPos.z, min.z, max.z),
+				x = math.clamp(base.x, min.x, max.x),
+				y = math.clamp(base.y, min.y, max.y),
+				z = math.clamp(base.z, min.z, max.z),
 			}
 		end
 	end

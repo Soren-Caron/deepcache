@@ -263,6 +263,34 @@ t.describe("sim/FireValidation direction and range", function()
 		expect(FireValidation.sanitizeDirection(v3(0 / 0, 0, 1))).toBeNil()
 	end)
 
+	-- Regressions from an audit pass. sanitizeDirection is the *only* thing
+	-- standing between a client-supplied aim vector and a raycast:
+	-- CombatService rejects with "bad_direction" purely on a nil return. Both
+	-- cases below slipped past the NaN-only check and returned a vector, so
+	-- the rejection never fired.
+	t.it("rejects an infinite direction instead of returning NaN components", function()
+		-- inf/inf is NaN, so normalising an infinite vector produced a NaN
+		-- direction -- the exact thing this function promises never to return.
+		expect(FireValidation.sanitizeDirection(v3(math.huge, 0, 0))).toBeNil()
+		expect(FireValidation.sanitizeDirection(v3(-math.huge, 0, 0))).toBeNil()
+		expect(FireValidation.sanitizeDirection(v3(math.huge, math.huge, math.huge))).toBeNil()
+	end)
+
+	t.it("rejects a direction whose magnitude overflows to infinity", function()
+		-- Each component is finite, but x^2+y^2+z^2 overflows, so magnitude is
+		-- inf and every component divided by it collapsed to exactly zero --
+		-- returning the zero-length direction this function also promises
+		-- never to return.
+		expect(FireValidation.sanitizeDirection(v3(1e200, 1e200, 1e200))).toBeNil()
+	end)
+
+	t.it("still accepts an ordinary large-but-finite direction", function()
+		-- Guards against over-correcting into rejecting legitimate input.
+		local dir = FireValidation.sanitizeDirection(v3(0, 0, 1e6)) :: Types.Vec3
+		expect(dir).never().toBeNil()
+		expect(Types.magnitude(dir)).approx(1, 1e-9)
+	end)
+
 	t.it("allows a small slack past max range", function()
 		-- Quantization and interpolation both nudge the target position, so an
 		-- exact range test would eat hits at the edge.
@@ -379,6 +407,57 @@ t.describe("sim/MovementGuard", function()
 		local state = MovementGuard.new()
 		local verdict = MovementGuard.check(state, v3(0, 0, 0), v3(0, -900, 0), DT, SPEED, params)
 		expect(table.find(verdict.reasons, "out_of_bounds")).never().toBeNil()
+	end)
+
+	-- Regression for a real exploit found in an audit pass. The out-of-bounds
+	-- branch used to overwrite `corrected` with clamp(newPos) unconditionally,
+	-- including when an earlier teleport/speed violation had already set it to
+	-- previousPos. Combining two violations therefore produced a *weaker*
+	-- correction than the teleport alone: instead of being put back where they
+	-- started, a cheater claiming a wildly out-of-bounds position got moved to
+	-- the world boundary -- an actual long-distance teleport, repeatable every
+	-- tick, achieved by violating two rules at once instead of one.
+	--
+	-- The existing test above exercises this exact path (900 studs is also a
+	-- teleport) but only asserted on `reasons`, never on `correctedPos`, which
+	-- is why it never caught it.
+	t.it("a teleport that is also out of bounds corrects to the previous position, not the boundary", function()
+		local params = table.clone(P)
+		params.worldMin = v3(-100, -50, -100)
+		params.worldMax = v3(100, 200, 100)
+
+		local state = MovementGuard.new()
+		local verdict = MovementGuard.check(state, v3(0, 0, 0), v3(9000, 0, 0), DT, SPEED, params)
+
+		expect(table.find(verdict.reasons, "teleport")).never().toBeNil()
+		expect(table.find(verdict.reasons, "out_of_bounds")).never().toBeNil()
+		expect(verdict.action).never().toEqual("ok")
+
+		-- The whole point: the player must not gain ground by cheating twice.
+		local pos = verdict.correctedPos :: Types.Vec3
+		expect(pos.x).toEqual(0)
+		expect(pos.y).toEqual(0)
+		expect(pos.z).toEqual(0)
+	end)
+
+	t.it("a pure out-of-bounds move (no teleport) still clamps to the boundary", function()
+		-- The counterpart, so the fix above doesn't over-correct: without a
+		-- teleport or speed violation there is no safer position to fall back
+		-- to, and clamping into the volume is the right answer.
+		local params = table.clone(P)
+		params.worldMin = v3(-100, -50, -100)
+		params.worldMax = v3(100, 200, 100)
+
+		local state = MovementGuard.new()
+		-- Start already at the edge; step a legal distance that crosses it.
+		local verdict = MovementGuard.check(state, v3(99.9, 0, 0), v3(100.4, 0, 0), DT, SPEED, params)
+
+		expect(table.find(verdict.reasons, "teleport")).toBeNil()
+		expect(table.find(verdict.reasons, "out_of_bounds")).never().toBeNil()
+		local pos = verdict.correctedPos
+		if pos ~= nil then
+			expect((pos :: Types.Vec3).x).toEqual(100)
+		end
 	end)
 
 	t.it("uses the caller's max speed, so weight is respected", function()

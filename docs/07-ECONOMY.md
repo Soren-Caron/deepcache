@@ -19,9 +19,24 @@ LedgerEntry = {
 The bug this design eliminates is the one that kills game economies: a duplicate grant. It happens when a payout request times out, the client or server retries, and both land. With `idemKey UNIQUE` on the database and an idempotency set in `core/economy/Ledger.luau`, the second write is a no-op — detected, counted, and ignored. Not an error, just a fact.
 
 ```lua
-Ledger.apply(state, entry) -> (newState, applied: boolean)
--- applied == false means idemKey was already seen. Caller treats this as success.
+Ledger.apply(state, entry) -> (newState, ok: boolean, status: ApplyStatus)
+-- status: "applied" | "duplicate" | "insufficient_funds"
+-- ok == true for both "applied" and "duplicate": in both cases the entry's
+--   effect is accounted for in the ledger, which is the only thing a caller
+--   needs to know before delivering whatever the entry paid for.
+-- ok == false ONLY for "insufficient_funds". Caller must not deliver.
 ```
+
+**Corrected during the M2–M6 audit pass.** This originally read
+`-> (newState, applied: boolean)`, with "`applied == false` means idemKey was
+already seen; caller treats this as success." That signature has no way to
+express the rejection this same document requires two sections down
+("negative balance is impossible (rejected, not clamped)"), so both outcomes
+collapsed onto `false` — and a caller following the stated rule would treat a
+*rejected* purchase as a success and hand over the goods without ever taking
+the currency. That is the duplicate-grant bug the ledger exists to prevent,
+arriving through the error path. The rejection now gets the distinct boolean
+and `status` disambiguates the rest.
 
 `idemKey` construction is deterministic so a retry produces the *same* key: `hash(runId .. pid .. reason .. sequenceWithinRun)`. A random UUID per attempt would defeat the entire mechanism — this is the detail to get right.
 

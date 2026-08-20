@@ -92,13 +92,25 @@ function FireValidation.inRange(origin: Types.Vec3, target: Types.Vec3, maxRange
 	return Types.distance(origin, target) <= maxRange + (slack or 2)
 end
 
---- Normalised aim direction. Returns nil for a zero-length or NaN direction,
---- which a malformed or malicious packet can supply.
+--- Normalised aim direction. Returns nil for a zero-length, NaN, infinite, or
+--- overflowing direction, which a malformed or malicious packet can supply.
+---
+--- Checking the *magnitude* is finite (rather than only checking the
+--- components for NaN) closes two holes that both reached CombatService,
+--- which rejects a fire request purely on a nil return here:
+---   - an infinite component: inf/inf is NaN, so normalising returned a
+---     direction with NaN components instead of nil.
+---   - three merely large components (1e200 each): every component is finite,
+---     but x^2+y^2+z^2 overflows to inf, and dividing by inf collapsed the
+---     result to exactly (0,0,0) -- the zero-length direction this function
+---     exists to reject.
 function FireValidation.sanitizeDirection(dir: Types.Vec3): Types.Vec3?
 	if dir.x ~= dir.x or dir.y ~= dir.y or dir.z ~= dir.z then
 		return nil
 	end
-	if Types.magnitude(dir) < 1e-6 then
+	local magnitude = Types.magnitude(dir)
+	-- NaN fails both comparisons, and inf fails the upper one.
+	if not (magnitude >= 1e-6 and magnitude < math.huge) then
 		return nil
 	end
 	return Types.normalize(dir)
