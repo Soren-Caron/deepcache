@@ -62,6 +62,32 @@ t.describe("net/Snapshot format", function()
 		expect(Snapshot.byteSize(81) <= Snapshot.MAX_BYTES).toBeTruthy()
 	end)
 
+	-- Added in an audit pass. Snapshot hardcodes its own copies of these three
+	-- numbers while config/Netcode.luau holds a second set, and
+	-- tools/validate-config.luau does all of its packet-capacity and bandwidth
+	-- reasoning against the *config* copy -- so a drift between the two would
+	-- have the validator cheerfully approving an INTEREST_MAX that the real
+	-- encoder then rejects at runtime (or worse, a budget the encoder happily
+	-- overruns). CLAUDE.md lists this byte budget as a "silently breaks"
+	-- item; nothing tied the two together before this.
+	t.it("agrees with config/Netcode, which is what validate-config reasons about", function()
+		local NetcodeConfig = require("../src/shared/config/Netcode")
+		expect(Snapshot.MAX_BYTES).toEqual(NetcodeConfig.SNAPSHOT_MAX_BYTES)
+		expect(Snapshot.HEADER_BYTES).toEqual(NetcodeConfig.SNAPSHOT_HEADER_BYTES)
+		expect(Snapshot.ENTITY_BYTES).toEqual(NetcodeConfig.SNAPSHOT_ENTITY_BYTES)
+		expect(Snapshot.KEYFRAME_INTERVAL).toEqual(NetcodeConfig.KEYFRAME_INTERVAL)
+		-- The invariant the validator actually depends on.
+		expect(NetcodeConfig.INTEREST_MAX <= Snapshot.capacity()).toBeTruthy()
+	end)
+
+	-- The count field is 7 bits (bit 7 is the keyframe flag), so capacity must
+	-- never exceed 127 or the count would overflow into the flag and a delta
+	-- would decode as a keyframe with a wrong entity count -- silent
+	-- corruption, not a loud failure.
+	t.it("capacity fits in the 7-bit count field", function()
+		expect(Snapshot.capacity() <= 127).toBeTruthy()
+	end)
+
 	t.it("encodes exactly header + 11 bytes per entity", function()
 		local rng = Rng.new(1)
 		for _, n in { 0, 1, 5, 40, 81 } do

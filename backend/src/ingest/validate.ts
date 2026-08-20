@@ -19,6 +19,17 @@ export interface ParsedEnvelope {
 const MAX_ID_LENGTH = 200;
 const MAX_TYPE_LENGTH = 64;
 
+/**
+ * Upper bound on `ts`, in seconds. JS `Date` is only defined over
+ * ±8.64e15 **milliseconds**, and `routes/ingest.ts` converts with
+ * `new Date(ts * 1000)`, so anything past this makes `.toISOString()` throw
+ * `RangeError: Invalid time value`. That throw escapes the route handler,
+ * turns the POST into a 500, and destroys every valid line that happened to
+ * share the batch — the precise failure that per-line validation exists to
+ * contain. Bounding it here keeps a bad line a *line* problem.
+ */
+const MAX_TS_SECONDS = 8.64e12;
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -32,6 +43,15 @@ function isFiniteNumber(value: unknown): value is number {
 }
 
 /**
+ * `Number.isSafeInteger` is typed `(n: unknown) => boolean` in TS's lib, not
+ * as a type predicate, so it does not narrow `unknown`. This wrapper does,
+ * which keeps the call sites free of `as number` casts.
+ */
+function isSafeInt(value: unknown): value is number {
+  return Number.isSafeInteger(value);
+}
+
+/**
  * Validate one decoded JSON line against the envelope shape the game client
  * emits (`core/telemetry/Buffer.Envelope`). Returns `null` — never throws —
  * so a caller iterating a batch can skip a bad line and keep processing its
@@ -42,14 +62,19 @@ export function validateEnvelope(value: unknown): ParsedEnvelope | null {
 
   const { v, ts, runId, serverId, placeId, pid, type, seq, p } = value as Record<string, unknown>;
 
-  if (!isFiniteNumber(v) || v < 1 || !Number.isInteger(v)) return null;
-  if (!isFiniteNumber(ts) || ts <= 0) return null;
+  // `Number.isSafeInteger` rather than `Number.isInteger` throughout: the
+  // latter is true for 1e20, which then overflows the `seq` column's Postgres
+  // `bigint` (max ~9.22e18) and fails the *whole* INSERT. Past 2^53 two
+  // distinct wire values can also collide into the same JS number, so a seq
+  // above the safe range cannot do the one job seq has (ordering/dedupe).
+  if (!isSafeInt(v) || v < 1) return null;
+  if (!isFiniteNumber(ts) || ts <= 0 || ts > MAX_TS_SECONDS) return null;
   if (!isNonEmptyString(runId, MAX_ID_LENGTH)) return null;
   if (!isNonEmptyString(serverId, MAX_ID_LENGTH)) return null;
-  if (!isFiniteNumber(placeId) || placeId < 0 || !Number.isInteger(placeId)) return null;
+  if (!isSafeInt(placeId) || placeId < 0) return null;
   if (pid !== undefined && pid !== null && !isNonEmptyString(pid, MAX_ID_LENGTH)) return null;
   if (!isNonEmptyString(type, MAX_TYPE_LENGTH)) return null;
-  if (!isFiniteNumber(seq) || seq < 1 || !Number.isInteger(seq)) return null;
+  if (!isSafeInt(seq) || seq < 1) return null;
   if (!isPlainObject(p)) return null;
 
   return {

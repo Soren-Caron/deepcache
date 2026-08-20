@@ -76,10 +76,18 @@ end
 -- Yaw
 --------------------------------------------------------------------------------
 
---- Radians -> uint8. Any input angle is accepted; it wraps into [0, 2pi).
+--- Radians -> uint8. Any *finite* input angle is accepted; it wraps into
+--- [0, 2pi). Non-finite input throws, for the same reason NaN does.
 function Quantize.encodeYaw(radians: number): number
-	if radians ~= radians then
-		error("Quantize.encodeYaw: radians is NaN", 2)
+	-- Infinity is rejected alongside NaN, not just for tidiness: `inf % TAU`
+	-- is NaN in Lua, so an infinite yaw slipped past a NaN-only guard and
+	-- came back out as NaN, which `buffer.writeu8` then silently writes as
+	-- 0 with no error at all -- precisely the "rounds to something arbitrary
+	-- and serialises silently" failure this guard exists to stop. Position
+	-- and unit encoding saturate on infinity instead, which is why only this
+	-- one needed the wider check.
+	if radians ~= radians or radians == math.huge or radians == -math.huge then
+		error("Quantize.encodeYaw: radians is NaN or infinite", 2)
 	end
 	-- Lua's % takes the sign of the divisor, so negatives wrap correctly.
 	local normalized = radians % TAU

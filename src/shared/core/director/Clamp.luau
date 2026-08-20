@@ -119,7 +119,17 @@ function Clamp.apply(
 		bounds.spawnMultiplierMaxDelta
 	)
 
-	local spawnPattern: Schema.SpawnPattern = if Schema.isSpawnPattern(p.spawnPattern) then p.spawnPattern else "even"
+	-- Falls back to the baseline, NOT to a literal "even". docs/05's clamping
+	-- table originally specified `else "even"`; that was wrong and the doc has
+	-- been corrected alongside this. The FSM emits "flank" in PRESSURE and
+	-- "chokepoint" in SPIKE (see Fsm.luau's PATTERN), so a literal fallback
+	-- let a malformed model field silently *downgrade* a deliberate pacing
+	-- decision -- the model changing gameplay by failing, which is the exact
+	-- thing this whole module exists to prevent. Every other field here falls
+	-- back to baseline; this one is no longer the exception.
+	local spawnPattern: Schema.SpawnPattern = if Schema.isSpawnPattern(p.spawnPattern)
+		then p.spawnPattern
+		else baseline.spawnPattern
 
 	local objective = clampObjective(p.objective, baseline.objective)
 

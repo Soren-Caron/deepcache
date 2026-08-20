@@ -123,6 +123,28 @@ t.describe("net/Quantize yaw", function()
 			Quantize.encodeYaw(0 / 0)
 		end).toThrow("NaN")
 	end)
+
+	-- Regression from an audit pass: `inf % TAU` is NaN in Lua, so an infinite
+	-- yaw slipped past the NaN-only guard, returned NaN, and buffer.writeu8
+	-- wrote it as 0 without erroring -- silent corruption of exactly the kind
+	-- the NaN guard exists to prevent.
+	t.it("rejects infinite yaw rather than silently encoding it as 0", function()
+		expect(function()
+			Quantize.encodeYaw(math.huge)
+		end).toThrow("infinite")
+		expect(function()
+			Quantize.encodeYaw(-math.huge)
+		end).toThrow("infinite")
+	end)
+
+	-- The counterpart: position and unit encoding are documented to *saturate*
+	-- rather than throw, so infinity must stay in-range there, not error.
+	t.it("position and unit saturate on infinity instead of throwing", function()
+		expect(Quantize.encodePosition(math.huge)).toEqual(32767)
+		expect(Quantize.encodePosition(-math.huge)).toEqual(-32768)
+		expect(Quantize.encodeUnit(math.huge)).toEqual(255)
+		expect(Quantize.encodeUnit(-math.huge)).toEqual(0)
+	end)
 end)
 
 t.describe("net/Quantize unit", function()

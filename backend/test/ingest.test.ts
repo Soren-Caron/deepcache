@@ -179,6 +179,39 @@ describe("POST /v1/ingest — validation", () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ accepted: 0, rejected: 2, duplicates: 0 });
   });
+
+  // The three cases below are regressions for a real bug found in an audit
+  // pass, not hypotheticals. `ts` and `seq` were validated only as "finite"
+  // and "an integer >= 1" respectively, with no upper bound. Both are then
+  // handed to something with a much narrower real domain:
+  //   - ts  -> `new Date(ts * 1000).toISOString()`, which THROWS RangeError
+  //            once ts exceeds ~8.64e12 (JS Date's +-8.64e15 ms limit).
+  //   - seq -> a Postgres `bigint` column, which errors above ~9.22e18.
+  // Either one escaping validation takes down the whole POST with a 500 and
+  // loses every valid sibling line in the batch -- the exact failure mode
+  // per-line validation exists to prevent.
+  it("rejects an out-of-range ts instead of 500ing and losing the whole batch", async () => {
+    const good = envelope();
+    const body = [JSON.stringify(good), JSON.stringify(envelope({ ts: 1e13 }))].join("\n");
+    const res = await post(body, secret);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ accepted: 1, rejected: 1, duplicates: 0 });
+  });
+
+  it("rejects a seq beyond bigint range instead of 500ing and losing the whole batch", async () => {
+    const good = envelope();
+    const body = [JSON.stringify(good), JSON.stringify(envelope({ seq: 1e20 }))].join("\n");
+    const res = await post(body, secret);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ accepted: 1, rejected: 1, duplicates: 0 });
+  });
+
+  it("still accepts a ts at the top of the sane range", async () => {
+    // Guards against over-correcting: a plausible far-future timestamp must
+    // keep working, only genuinely unrepresentable ones are rejected.
+    const res = await post(ndjson([envelope({ ts: 4102444800 })]), secret); // 2100-01-01
+    expect(res.json()).toEqual({ accepted: 1, rejected: 0, duplicates: 0 });
+  });
 });
 
 describe("POST /v1/ingest — dedupe", () => {

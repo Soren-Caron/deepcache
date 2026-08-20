@@ -139,6 +139,46 @@ t.describe("Clamp.apply: 20+ malformed inputs, all return a valid decision", fun
 	end)
 end)
 
+t.describe("Clamp.apply: an illegal field falls back to the FSM baseline, not to a literal", function()
+	-- Regression for a real bug found in an audit pass. Every other field in
+	-- Clamp.apply falls back to `baseline.*`; spawnPattern alone fell back to
+	-- the hardcoded string "even" (which docs/05's clamping table specified).
+	-- That is the one field where a malformed model response could *change*
+	-- gameplay rather than leave it at the trusted FSM decision: the FSM emits
+	-- "flank" in PRESSURE and "chokepoint" in SPIKE (core/director/Fsm.luau
+	-- PATTERN), so garbage from the model silently downgraded a deliberate
+	-- pacing choice to "even".
+	--
+	-- This went undetected because the shared `baseline()` fixture above uses
+	-- spawnPattern = "even" itself, making the two behaviours indistinguishable
+	-- in every existing case. These use a non-"even" baseline on purpose.
+	local function pressureBaseline(): Schema.DirectorDecision
+		local b = baseline()
+		b.spawnPattern = "flank"
+		return b
+	end
+
+	t.it("a wrong-type spawnPattern preserves the baseline's pattern", function()
+		local d = Clamp.apply({ spawnPattern = 0 / 0 }, pressureBaseline(), BOUNDS)
+		expect(d.spawnPattern).toEqual("flank")
+	end)
+
+	t.it("a not-in-enum spawnPattern preserves the baseline's pattern", function()
+		local d = Clamp.apply({ spawnPattern = "pincer" }, pressureBaseline(), BOUNDS)
+		expect(d.spawnPattern).toEqual("flank")
+	end)
+
+	t.it("an entirely absent spawnPattern preserves the baseline's pattern", function()
+		local d = Clamp.apply({ intent = "escalate" }, pressureBaseline(), BOUNDS)
+		expect(d.spawnPattern).toEqual("flank")
+	end)
+
+	t.it("a legal spawnPattern still overrides the baseline", function()
+		local d = Clamp.apply({ spawnPattern = "chokepoint" }, pressureBaseline(), BOUNDS)
+		expect(d.spawnPattern).toEqual("chokepoint")
+	end)
+end)
+
 t.describe("Clamp.rateLimited", function()
 	t.it("clamps to the absolute range when the delta window doesn't bind", function()
 		-- A large maxDelta isolates the absolute-range clamp from the

@@ -87,13 +87,25 @@ Schema is defined once in `backend/src/llm/schema.ts` and mirrored in `core/dire
 | Field | Rule |
 |---|---|
 | `spawnMultiplier` | clamp to `[0.6, 1.6]`; additionally rate-limited to ±0.25 change per tick so difficulty can't whipsaw |
-| `spawnPattern` | must be in enum, else `"even"` |
+| `spawnPattern` | must be in enum, else keep the FSM baseline's pattern |
 | `objective.id` | must be in the whitelist **and** not currently on cooldown, else keep the active objective |
 | `objective.params` | each param clamped to the per-objective range in `Objectives.luau`; unknown keys dropped |
 | `threatTier` | clamp to `[1, 5]`, max ±1 change per tick |
 | `bark` | max 180 chars, stripped of control characters, then **must pass content filtering** (below) |
 | anything missing | filled from the FSM baseline |
 | whole payload malformed / null | return FSM baseline unchanged, increment `fallbackUsed` |
+
+**Corrected during the M2–M6 audit pass:** `spawnPattern` previously read
+`must be in enum, else "even"`. That was the only rule in this table that
+fell back to a *literal* rather than to the FSM baseline, and it was wrong:
+the FSM emits `flank` in PRESSURE and `chokepoint` in SPIKE
+(`core/director/Fsm.luau`), so a malformed model field silently replaced a
+deliberate pacing decision with `even`. A model that fails should never be
+able to change gameplay — it should leave the FSM's decision standing, which
+is what every other row here already did. Code and doc corrected together;
+regression tests in `tests/clamp.spec.luau`. The bug survived original
+implementation because the clamp test fixture's own baseline used
+`spawnPattern = "even"`, making the two behaviours indistinguishable.
 
 **Scope split on the `objective.id` row, worth being explicit about:** `Clamp.luau` (M4-5) owns the whitelist half — an id outside `Schema.OBJECTIVE_IDS` falls back to the baseline. Cooldown tracking is stateful and lives in the objective system (M4-8) instead, since `Clamp.apply` is pure and has no notion of time or history. In practice this means the caller is responsible for only ever passing `Clamp.apply` a `baseline.objective` that is already cooldown-legal — Clamp enforces "in the whitelist," the caller enforces "and available right now" by construction of what it hands in as the baseline.
 
