@@ -27,6 +27,14 @@ return {
 	VIOLATION_CORRECT_AT = 5,
 	VIOLATION_KICK_AT = 20,
 
+	-- Vertical movement is budgeted separately from walk speed; see
+	-- core/sim/MovementGuard. Multiplier applied to the jump impulse the
+	-- engine actually reports, for ramps and knockback.
+	RISE_SPEED_HEADROOM = 1.25,
+	-- Studs/s. ~160 studs of free fall, and 12.5 studs/tick at 20Hz, which
+	-- stays under TELEPORT_THRESHOLD so the two checks cannot disagree.
+	MAX_FALL_SPEED = 250,
+
 	TICK_BUDGET_MS = 12,
 
 	-- Raised from 6 after measurement. 32 visible entities all changing every

@@ -67,8 +67,30 @@ requireNumber("Netcode.INTEREST_MAX", Netcode.INTEREST_MAX, 1, 200)
 requireNumber("Netcode.LAGCOMP_WINDOW", Netcode.LAGCOMP_WINDOW, 0.05, 0.5)
 requireNumber("Netcode.EXTRAPOLATE_MAX", Netcode.EXTRAPOLATE_MAX, 0, 0.25)
 requireNumber("Netcode.SPEED_MARGIN", Netcode.SPEED_MARGIN, 1.0, 2.0)
+requireNumber("Netcode.RISE_SPEED_HEADROOM", Netcode.RISE_SPEED_HEADROOM, 1.0, 3.0)
+requireNumber("Netcode.MAX_FALL_SPEED", Netcode.MAX_FALL_SPEED, 50, 2000)
 
 -- Cross-checks that a range test alone would not catch.
+
+-- The fall budget and the teleport threshold are two answers to the same
+-- question, and they must not contradict: if a legitimate fall can cover more
+-- ground in one tick than the teleport check tolerates, every long drop is a
+-- "teleport" and the player gets corrected mid-air. That is precisely the
+-- class of bug that made jumping kick players.
+do
+	local perTick = Netcode.MAX_FALL_SPEED * Netcode.SPEED_MARGIN / Netcode.TICK_RATE
+	if perTick > Netcode.TELEPORT_THRESHOLD then
+		fail(
+			"Netcode.MAX_FALL_SPEED",
+			string.format(
+				"a legal fall covers %.1f studs/tick, past TELEPORT_THRESHOLD of %d -- "
+					.. "long falls would be flagged as teleports. Lower MAX_FALL_SPEED or raise the threshold.",
+				perTick,
+				Netcode.TELEPORT_THRESHOLD
+			)
+		)
+	end
+end
 if Netcode.SNAPSHOT_MAX_BYTES > 1000 then
 	fail("Netcode.SNAPSHOT_MAX_BYTES", "above the UnreliableRemoteEvent drop threshold (~1000 bytes)")
 end

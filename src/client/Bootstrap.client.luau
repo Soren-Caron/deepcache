@@ -13,10 +13,12 @@ local Branding = require(Shared.config.Branding)
 local EntityRenderer = require("./controllers/EntityRenderer")
 local PredictionController = require("./controllers/PredictionController")
 local HudController = require("./controllers/HudController")
+local CorrectionController = require("./controllers/CorrectionController")
 
 local function main()
 	EntityRenderer.start()
 	HudController.start()
+	CorrectionController.start()
 
 	PredictionController.setHooks({
 		onTracer = function(origin: Vector3, target: Vector3)
@@ -41,7 +43,7 @@ local function main()
 
 	PredictionController.start()
 
-	print(`[{Branding.gameName}] client up — entities, prediction, HUD`)
+	print(`[{Branding.gameName}] client up — entities, prediction, HUD, corrections`)
 end
 
 main()

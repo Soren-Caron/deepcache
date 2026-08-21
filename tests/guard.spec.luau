@@ -399,6 +399,126 @@ t.describe("sim/MovementGuard", function()
 		expect(state.score).toEqual(0)
 	end)
 
+	-- Regressions for a real bug reported from a live playtest: pressing space
+	-- got the player kicked. `maxSpeed` is a WALK speed (16), but the check
+	-- measured one 3D displacement against it, so gravity was charged to the
+	-- player's speed budget. Measured in Studio with horizontal displacement
+	-- at exactly 0.00, a standing jump accrued 2.57x the allowance per
+	-- airborne tick and hit "correct" 12 ticks in.
+	--
+	-- Every pre-existing test in this file moves along a single horizontal
+	-- axis, which is why none of them could catch it.
+	t.it("a standing jump is not a speed violation", function()
+		local state = MovementGuard.new()
+		-- Roblox default jump impulse is ~53 studs/s; at 20Hz that is ~2.66
+		-- studs of purely vertical movement in one tick, against a horizontal
+		-- allowance of 16 * 1.35 / 20 = 1.08 studs.
+		local verdict = MovementGuard.check(state, v3(0, 0, 0), v3(0, 2.66, 0), DT, SPEED, P)
+		expect(verdict.action).toEqual("ok")
+		expect(#verdict.reasons).toEqual(0)
+		expect(state.score).toEqual(0)
+	end)
+
+	t.it("a sustained fall is not a speed violation", function()
+		-- Falling accelerates; after a second it is ~196 studs/s, which is
+		-- 9.8 studs per tick -- 9x the horizontal allowance.
+		local state = MovementGuard.new()
+		local y = 0
+		for _ = 1, 20 do
+			local nextY = y - 9.81
+			MovementGuard.check(state, v3(0, y, 0), v3(0, nextY, 0), DT, SPEED, P)
+			y = nextY
+		end
+		expect(state.score).toEqual(0)
+	end)
+
+	t.it("running and jumping at the same time is not a violation", function()
+		-- The realistic case: full walk speed horizontally AND a jump.
+		local state = MovementGuard.new()
+		local horizontal = SPEED * DT -- exactly at the walk budget
+		local verdict = MovementGuard.check(state, v3(0, 0, 0), v3(horizontal, 2.66, 0), DT, SPEED, P)
+		expect(verdict.action).toEqual("ok")
+		expect(state.score).toEqual(0)
+	end)
+
+	t.it("still catches a horizontal speed hack while airborne", function()
+		-- The fix must not become a loophole: vertical leniency cannot excuse
+		-- horizontal cheating just because the player is off the ground.
+		local state = MovementGuard.new()
+		local verdict = MovementGuard.check(state, v3(0, 0, 0), v3(10, 2.66, 0), DT, SPEED, P)
+		expect(table.find(verdict.reasons, "speed")).never().toBeNil()
+		expect(state.score > 0).toBeTruthy()
+	end)
+
+	t.it("catches a fly hack: rising far faster than a jump impulse", function()
+		-- Going UP faster than a jump is not something the engine does, so the
+		-- rise budget stays tight enough to catch it.
+		local state = MovementGuard.new()
+		local verdict = MovementGuard.check(state, v3(0, 0, 0), v3(0, 20, 0), DT, SPEED, P)
+		expect(table.find(verdict.reasons, "vertical_speed")).never().toBeNil()
+		expect(state.score > 0).toBeTruthy()
+	end)
+
+	-- A per-tick speed check alone cannot catch this one, which is why the
+	-- sustained-rise counter exists: 40 studs/s is BELOW the jump impulse
+	-- (~53), so every individual frame is indistinguishable from a jump. Found
+	-- by adversarially probing the vertical-split fix rather than assuming it
+	-- was complete.
+	t.it("catches a slow fly hack that never exceeds the per-tick rise budget", function()
+		local state = MovementGuard.new()
+		local y = 0
+		local lastVerdict
+		for _ = 1, 20 do
+			local nextY = y + 2.0 -- 40 studs/s at 20Hz; under the ~66 rise budget
+			lastVerdict = MovementGuard.check(state, v3(0, y, 0), v3(0, nextY, 0), DT, SPEED, P)
+			y = nextY
+		end
+		expect(table.find(lastVerdict.reasons, "sustained_rise")).never().toBeNil()
+		expect(state.score >= P.correctAt).toBeTruthy()
+	end)
+
+	t.it("a real jump arc does not trip the sustained-rise counter", function()
+		-- The counterpart. A jump decelerates under gravity, so it only
+		-- outpaces ground speed for a handful of ticks.
+		local state = MovementGuard.new()
+		local velocity = 53.15 -- Roblox default jump impulse
+		local y = 0
+		for _ = 1, 12 do
+			velocity -= 196.2 * DT
+			local nextY = y + velocity * DT
+			MovementGuard.check(state, v3(0, y, 0), v3(0, nextY, 0), DT, SPEED, P)
+			y = nextY
+		end
+		expect(state.score).toEqual(0)
+		expect(state.risingTicks <= P.maxRiseTicks).toBeTruthy()
+	end)
+
+	t.it("walking up a long ramp never counts as rising", function()
+		-- Ground movement cannot outpace maxSpeed, so a ramp -- however long --
+		-- must never accumulate rising ticks. This is what keeps the
+		-- sustained-rise check from becoming a false-positive generator.
+		local state = MovementGuard.new()
+		local y = 0
+		for _ = 1, 200 do
+			local nextY = y + (SPEED * 0.6) * DT -- climbing at 60% of walk speed
+			MovementGuard.check(state, v3(0, y, 0), v3(0, nextY, 0), DT, SPEED, P)
+			y = nextY
+		end
+		expect(state.risingTicks).toEqual(0)
+		expect(state.score).toEqual(0)
+	end)
+
+	t.it("rise is budgeted more tightly than fall", function()
+		-- Same magnitude, opposite directions: falling is gravity, rising is
+		-- not. The asymmetry is the whole point.
+		local rising = MovementGuard.new()
+		local falling = MovementGuard.new()
+		MovementGuard.check(rising, v3(0, 0, 0), v3(0, 9, 0), DT, SPEED, P)
+		MovementGuard.check(falling, v3(0, 0, 0), v3(0, -9, 0), DT, SPEED, P)
+		expect(rising.score > falling.score).toBeTruthy()
+		expect(falling.score).toEqual(0)
+	end)
+
 	t.it("clamps a position outside the world volume", function()
 		local params = table.clone(P)
 		params.worldMin = v3(-100, -50, -100)

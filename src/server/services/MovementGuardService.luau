@@ -38,6 +38,32 @@ params.teleportThreshold = NetcodeConfig.TELEPORT_THRESHOLD
 params.decayPerSecond = NetcodeConfig.VIOLATION_DECAY_PER_SEC
 params.correctAt = NetcodeConfig.VIOLATION_CORRECT_AT
 params.kickAt = NetcodeConfig.VIOLATION_KICK_AT
+params.maxFallSpeed = NetcodeConfig.MAX_FALL_SPEED
+
+--- The upward budget is derived from the engine's *live* jump settings rather
+--- than hardcoded, because the two are the same physical quantity: a
+--- character leaves the ground at `sqrt(2 * gravity * jumpHeight)` (or
+--- straight at `JumpPower` when the place still uses that). Hardcoding it
+--- would silently start kicking players the moment someone tuned jump height
+--- or gravity, which is exactly the class of bug this guard just caused.
+local function measuredRiseSpeed(): number
+	local StarterPlayer = game:GetService("StarterPlayer")
+	local gravity = workspace.Gravity
+	local ok, impulse = pcall(function(): number
+		if StarterPlayer.CharacterUseJumpPower then
+			return StarterPlayer.CharacterJumpPower
+		end
+		return math.sqrt(2 * gravity * StarterPlayer.CharacterJumpHeight)
+	end)
+	if not ok or impulse ~= impulse or impulse <= 0 then
+		return MovementGuard.DEFAULT_PARAMS.maxRiseSpeed
+	end
+	-- Headroom over the raw impulse for ramps, knockback, and conveyor-style
+	-- boosts, on top of the separate speedMargin the check already applies.
+	return impulse * NetcodeConfig.RISE_SPEED_HEADROOM
+end
+
+params.maxRiseSpeed = measuredRiseSpeed()
 
 --- Player max speed. M2 replaces this with the weight-derived value; the guard
 --- must use the same number the movement code does, or a heavily loaded player
