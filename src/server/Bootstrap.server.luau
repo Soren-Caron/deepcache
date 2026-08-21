@@ -34,6 +34,7 @@ local MovementGuardService = require("./services/MovementGuardService")
 local DirectorService = require("./services/DirectorService")
 local QueueService = require("./services/QueueService")
 local EconomyService = require("./services/EconomyService")
+local MarketService = require("./services/MarketService")
 local Diagnostics = require("./services/Diagnostics")
 local TickBench = require("./smoke/TickBench")
 
@@ -89,6 +90,7 @@ local function main()
 	-- M6-6: compiled-in defaults are already live; this only ever upgrades
 	-- them, and runs on its own thread so a dead backend cannot delay boot.
 	EconomyService.startConfigPolling()
+	MarketService.init()
 
 	-- The guard has to use the same speed the movement code does. It defaulted
 	-- to a flat 16, which is merely lenient for a loaded player — but once
@@ -370,6 +372,154 @@ local function main()
 	end)
 
 	Diagnostics.register("economyInfo", EconomyService.describe)
+	Diagnostics.register("marketInfo", MarketService.describe)
+
+	-- M6-10 acceptance: list, bid, fill, cancel, driven against the real
+	-- MarketService with a real connected player, and checked for
+	-- conservation at the end. Exercises the server path the UI calls, so a
+	-- pass here means the panel's buttons have something working behind them.
+	Diagnostics.register("marketProbe", function(itemId: string?)
+		local Escrow_ = require(Shared.core.economy.Escrow)
+		local id = itemId or "optics_module"
+		local player = Players:GetPlayers()[1]
+		if player == nil then
+			return { error = "no player connected -- join before running this" }
+		end
+		MarketService.reset()
+		MarketService.setRunsPlayed(player, 50)
+		MarketService.credit(player, 100000, { [id] = 10 })
+
+		local escrowState = MarketService.state()
+		local startCredits = Escrow_.totalCredits(escrowState)
+		local startItems = Escrow_.totalItems(escrowState, id)
+
+		local steps = {}
+		-- LIST
+		local listOk, listReason = MarketService.place(player, id, "sell", 200, 3)
+		table.insert(steps, `list sell 3@200 -> {tostring(listOk)} {tostring(listReason)}`)
+		-- BID that does not cross (below the ask)
+		local bidOk, bidReason = MarketService.place(player, id, "buy", 150, 2)
+		table.insert(steps, `bid 2@150 (no cross) -> {tostring(bidOk)} {tostring(bidReason)}`)
+		-- Snapshot the book depth
+		local _, bookState = MarketService.state()
+		local asks, bids = 0, 0
+		for _, o in bookState.asks do
+			if o.itemId == id then asks += 1 end
+		end
+		for _, o in bookState.bids do
+			if o.itemId == id then bids += 1 end
+		end
+		table.insert(steps, `book now: {bids} bid(s), {asks} ask(s)`)
+
+		-- CANCEL the resting bid
+		local myOrderId: string? = nil
+		for orderId, order in escrowState.orders do
+			if order.side == "buy" then myOrderId = orderId end
+		end
+		local cancelOk, cancelReason = MarketService.cancel(player, myOrderId or "")
+		table.insert(steps, `cancel bid -> {tostring(cancelOk)} {tostring(cancelReason)}`)
+
+		-- Rejections the client must not be able to talk its way past.
+		local badItem = { MarketService.place(player, "overseer_shard", "sell", 100, 1) }
+		table.insert(steps, `sell untradeable -> {tostring(badItem[1])} {tostring(badItem[2])}`)
+		local badPrice = { MarketService.place(player, id, "sell", 99.5, 1) }
+		table.insert(steps, `fractional price -> {tostring(badPrice[1])} {tostring(badPrice[2])}`)
+		local outOfBand = { MarketService.place(player, id, "sell", 99999, 1) }
+		table.insert(steps, `out of band -> {tostring(outOfBand[1])} {tostring(outOfBand[2])}`)
+		local missing = { MarketService.cancel(player, "999999:1") }
+		table.insert(steps, `cancel a nonexistent id -> {tostring(missing[1])} {tostring(missing[2])}`)
+
+		-- The ownership check specifically. A nonexistent id above exits at
+		-- "unknown_order" and never reaches it, so an order that really does
+		-- exist under a different pid is planted to exercise the branch that
+		-- stops one player cancelling another's order and pocketing the escrow.
+		local Escrow2 = require(Shared.core.economy.Escrow)
+		local victimEscrow = MarketService.state()
+		local victim = Escrow2.account(victimEscrow, "someone-else")
+		victim.runsPlayed = 50
+		victim.inventory[id] = 3
+		Escrow2.placeSell(victimEscrow, "someone-else:1", "someone-else", id, 200, 1, {
+			maxOpenOrdersPerItem = 5, dailyTradeVolumeCap = math.huge, minRunsToSell = 5,
+		})
+		local stolen = { MarketService.cancel(player, "someone-else:1") }
+		table.insert(steps, `cancel another player's real order -> {tostring(stolen[1])} {tostring(stolen[2])}`)
+		table.insert(
+			steps,
+			`victim's escrow intact after the attempt: {tostring(Escrow2.escrowedCount(victimEscrow, "someone-else", id) == 1)}`
+		)
+
+		-- The victim account planted above was seeded with 3 items *after*
+		-- `startItems` was captured, so the raw totals legitimately differ by
+		-- exactly that. Accounting for it explicitly beats comparing against a
+		-- stale baseline and reporting a conservation failure that is really a
+		-- fixture artifact -- a false alarm on a conservation check is worse
+		-- than no check, because it trains you to ignore it.
+		local PLANTED = 3
+		return {
+			steps = steps,
+			creditsConserved = Escrow_.totalCredits(escrowState) == startCredits,
+			itemsConserved = Escrow_.totalItems(escrowState, id) == startItems + PLANTED,
+			startCredits = startCredits,
+			endCredits = Escrow_.totalCredits(escrowState),
+			startItems = startItems,
+			plantedItems = PLANTED,
+			endItems = Escrow_.totalItems(escrowState, id),
+			info = MarketService.describe(),
+		}
+	end)
+
+	-- The fill half, which needs two distinct pids. Uses the real engine but
+	-- seeds a second account directly, since a second human is not available
+	-- in a Studio smoke test.
+	Diagnostics.register("marketFillProbe", function(itemId: string?)
+		local Escrow_ = require(Shared.core.economy.Escrow)
+		local Market_ = require(Shared.core.economy.Market)
+		local id = itemId or "optics_module"
+		local player = Players:GetPlayers()[1]
+		if player == nil then
+			return { error = "no player connected" }
+		end
+		MarketService.reset()
+		MarketService.setRunsPlayed(player, 50)
+		MarketService.credit(player, 100000, { [id] = 5 })
+
+		local escrowState, bookState = MarketService.state()
+		local counterparty = "counterparty-pid"
+		local other = Escrow_.account(escrowState, counterparty)
+		other.credits = 100000
+		other.runsPlayed = 50
+		other.inventory[id] = 5
+
+		local startCredits = Escrow_.totalCredits(escrowState)
+		local startItems = Escrow_.totalItems(escrowState, id)
+
+		-- Counterparty rests an ask; the player's bid crosses it.
+		Escrow_.placeSell(escrowState, "cp:1", counterparty, id, 180, 2, {
+			maxOpenOrdersPerItem = 5, dailyTradeVolumeCap = math.huge, minRunsToSell = 5,
+		})
+		local newBook, restFills = Market_.match(bookState, {
+			id = "cp:1", pid = counterparty, itemId = id, side = "sell",
+			price = 180, quantity = 2, filled = 0, ts = 1,
+		})
+		MarketService.setVwap(id, 180)
+		local _ = restFills
+		local _ = newBook
+
+		local ok, reason = MarketService.place(player, id, "buy", 200, 2)
+		local afterEscrow = select(1, MarketService.state())
+		return {
+			placed = ok,
+			reason = reason,
+			-- Total holdings, not the delta: the player was seeded with 5 and
+			-- buys 2, so 7 is the correct answer and 2 would be the wrong one.
+			playerTotalItems = Escrow_.inventoryCount(afterEscrow, tostring(player.UserId), id),
+			counterpartyCredits = Escrow_.account(afterEscrow, counterparty).credits,
+			feesCollected = afterEscrow.feesCollected,
+			creditsConserved = Escrow_.totalCredits(afterEscrow) == startCredits,
+			itemsConserved = Escrow_.totalItems(afterEscrow, id) == startItems,
+			info = MarketService.describe(),
+		}
+	end)
 
 	-- M6-3 acceptance: "each reason code produces a ledger entry with the
 	-- right sign." Drives a whole run through the real service -- extract,

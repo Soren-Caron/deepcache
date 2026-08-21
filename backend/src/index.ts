@@ -11,6 +11,7 @@ import { DIRECTOR_JSON_SCHEMA } from "./llm/schema.js";
 import { warmUpModel } from "./llm/warmup.js";
 import { startRollupWorker } from "./rollup.js";
 import { startEconomyWorker } from "./workers/economy.js";
+import { startReconcileWorker } from "./workers/reconcile.js";
 import { TICK_KEEP_ALIVE } from "./routes/director.js";
 import { startRecommendWorker } from "./workers/recommend.js";
 
@@ -28,12 +29,29 @@ async function main(): Promise<void> {
   // docs/07 §The controller: the PI loop runs nightly over a trailing 24h
   // ledger window. Same started-outside-buildApp reasoning as the two above.
   const economyTimer = startEconomyWorker(getPool(config));
+  // docs/07 §Persistence: nightly ledger-vs-cache reconciliation. Target is
+  // zero mismatches, so a nonzero count is logged at warn -- it is a bug
+  // report, not a metric to watch drift upward.
+  const reconcileTimer = startReconcileWorker(getPool(config), undefined, (report) => {
+    if (report.mismatches.length > 0) {
+      app.log.warn(
+        { mismatches: report.mismatches.length, sample: report.mismatches.slice(0, 5) },
+        "ledger reconciliation found mismatches",
+      );
+    } else {
+      app.log.info(
+        { playersChecked: report.playersChecked, entriesChecked: report.entriesChecked },
+        "ledger reconciliation clean",
+      );
+    }
+  });
 
   const shutdown = async (signal: string): Promise<void> => {
     app.log.info({ signal }, "shutting down");
     clearInterval(rollupTimer);
     clearInterval(recommendTimer);
     clearInterval(economyTimer);
+    clearInterval(reconcileTimer);
     try {
       await app.close();
       process.exit(0);

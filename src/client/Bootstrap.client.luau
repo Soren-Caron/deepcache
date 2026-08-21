@@ -14,11 +14,13 @@ local EntityRenderer = require("./controllers/EntityRenderer")
 local PredictionController = require("./controllers/PredictionController")
 local HudController = require("./controllers/HudController")
 local CorrectionController = require("./controllers/CorrectionController")
+local MarketController = require("./controllers/MarketController")
 
 local function main()
 	EntityRenderer.start()
 	HudController.start()
 	CorrectionController.start()
+	MarketController.start()
 
 	PredictionController.setHooks({
 		onTracer = function(origin: Vector3, target: Vector3)
@@ -43,7 +45,7 @@ local function main()
 
 	PredictionController.start()
 
-	print(`[{Branding.gameName}] client up — entities, prediction, HUD, corrections`)
+	print(`[{Branding.gameName}] client up — entities, prediction, HUD, corrections, market`)
 end
 
 main()

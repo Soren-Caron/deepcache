@@ -56,6 +56,17 @@ local DECLARATIONS: { [string]: RemoteKind } = {
 	CarryUpdate = "Reliable",
 	--- Server -> client, ~1Hz. Clock, pad states, squad status for the HUD.
 	RunState = "Reliable",
+
+	--- Client -> server. Place, cancel, or refresh a market order. Every field
+	--- is validated server-side; the client is asking, not telling. Reliable
+	--- because a dropped request leaves escrow the player believes they moved
+	--- exactly where it was, and they will assume the game ate it.
+	MarketRequest = "Reliable",
+	--- Server -> client. Order book for the viewed item, this player's own
+	--- open orders, and their spendable balance. Reliable for the same reason
+	--- CarryUpdate is: a lost update leaves the UI lying about the numbers a
+	--- player is spending real currency against.
+	MarketUpdate = "Reliable",
 }
 
 local CLASS_BY_KIND: { [RemoteKind]: string } = {
