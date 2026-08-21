@@ -10,6 +10,7 @@ import { loadOverseerPrompt } from "./llm/prompt.js";
 import { DIRECTOR_JSON_SCHEMA } from "./llm/schema.js";
 import { warmUpModel } from "./llm/warmup.js";
 import { startRollupWorker } from "./rollup.js";
+import { startEconomyWorker } from "./workers/economy.js";
 import { TICK_KEEP_ALIVE } from "./routes/director.js";
 import { startRecommendWorker } from "./workers/recommend.js";
 
@@ -24,11 +25,15 @@ async function main(): Promise<void> {
   // docs/06 §Loadout recommendations: "computed nightly." Same started-
   // outside-buildApp reasoning as the rollup timer above.
   const recommendTimer = startRecommendWorker(getPool(config));
+  // docs/07 §The controller: the PI loop runs nightly over a trailing 24h
+  // ledger window. Same started-outside-buildApp reasoning as the two above.
+  const economyTimer = startEconomyWorker(getPool(config));
 
   const shutdown = async (signal: string): Promise<void> => {
     app.log.info({ signal }, "shutting down");
     clearInterval(rollupTimer);
     clearInterval(recommendTimer);
+    clearInterval(economyTimer);
     try {
       await app.close();
       process.exit(0);

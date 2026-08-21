@@ -33,6 +33,7 @@ local CombatService = require("./services/CombatService")
 local MovementGuardService = require("./services/MovementGuardService")
 local DirectorService = require("./services/DirectorService")
 local QueueService = require("./services/QueueService")
+local EconomyService = require("./services/EconomyService")
 local Diagnostics = require("./services/Diagnostics")
 local TickBench = require("./smoke/TickBench")
 
@@ -85,6 +86,9 @@ local function main()
 	-- OVERSEER (M4): the FSM baseline runs regardless of backend
 	-- availability, per this file's own boot-order contract above.
 	DirectorService.start()
+	-- M6-6: compiled-in defaults are already live; this only ever upgrades
+	-- them, and runs on its own thread so a dead backend cannot delay boot.
+	EconomyService.startConfigPolling()
 
 	-- The guard has to use the same speed the movement code does. It defaulted
 	-- to a flat 16, which is merely lenient for a loaded player — but once
@@ -363,6 +367,81 @@ local function main()
 	-- confirm a canned line comes back, never the raw text.
 	Diagnostics.register("directorForceFilterBark", function(rawBark: string?, intent: string?, userId: number?)
 		return DirectorService.forceFilterBark(rawBark or "raw unfiltered text", intent or "hold_steady", userId or 0)
+	end)
+
+	Diagnostics.register("economyInfo", EconomyService.describe)
+
+	-- M6-3 acceptance: "each reason code produces a ledger entry with the
+	-- right sign." Drives a whole run through the real service -- extract,
+	-- objective bonus, daily first, repair, ammo, insurance premium and a
+	-- death claim -- and reports the signed delta each reason produced, so
+	-- the sign is observed rather than asserted about.
+	Diagnostics.register("economyRunProbe", function(runId: string?, pid: string?)
+		local run = runId or `probe-{os.time()}`
+		local player = pid or "probe-pid"
+		EconomyService.reset()
+		local now = os.time()
+
+		-- Seed a starting balance. Without it the very first entry (an
+		-- insurance premium, a sink) would be correctly rejected for
+		-- insufficient funds and the probe would report a zero-signed sink,
+		-- which reads like a bug in the sign rule rather than the ledger's
+		-- negative-balance guard doing its job. A real player arrives with
+		-- credits from previous runs; `admin_adjust` is the sanctioned way to
+		-- put them there.
+		EconomyService.record(run, player, "admin_adjust", 5000, now)
+
+		local before = EconomyService.balance(player)
+		EconomyService.buyInsurance(run, player, 2000, now)
+		local afterPremium = EconomyService.balance(player)
+		EconomyService.onExtract(run, player, 1000, 1, true, now)
+		local afterExtract = EconomyService.balance(player)
+		EconomyService.onRunEnd(run, player, 600, 7, now)
+		local afterSinks = EconomyService.balance(player)
+		local claim = EconomyService.onDeath(run, player, 2000, now)
+		local afterClaim = EconomyService.balance(player)
+
+		return {
+			insurancePremium = afterPremium - before, -- expect negative
+			faucetsOnExtract = afterExtract - afterPremium, -- expect positive
+			sinksOnRunEnd = afterSinks - afterExtract, -- expect negative
+			insuranceClaim = afterClaim - afterSinks, -- expect positive
+			claimAmount = claim,
+			finalBalance = afterClaim,
+			info = EconomyService.describe(),
+		}
+	end)
+
+	-- M6-1 acceptance, in-engine: the same idemKey applied twice must be
+	-- absorbed as a duplicate rather than double-granting.
+	Diagnostics.register("economyIdempotency", function()
+		EconomyService.reset()
+		local now = os.time()
+		local first = { EconomyService.record("dup-run", "dup-pid", "extract_payout", 500, now) }
+		local balanceAfterFirst = EconomyService.balance("dup-pid")
+		-- Same run/pid/reason but a fresh sequence is a *different* grant, so
+		-- to test the duplicate path the ledger is driven directly.
+		local Ledger_ = require(Shared.core.economy.Ledger)
+		return {
+			firstOk = first[1],
+			firstStatus = first[2],
+			balanceAfterFirst = balanceAfterFirst,
+			sameKeyTwiceIsDuplicate = (function()
+				local state = Ledger_.new()
+				local key = Ledger_.makeKey("r", "p", "extract_payout", 1)
+				local entry = { pid = "p", delta = 100, reason = "extract_payout" :: any, runId = "r", idemKey = key, ts = 0 }
+				local _, ok1, s1 = Ledger_.apply(state, entry)
+				local _, ok2, s2 = Ledger_.apply(state, entry)
+				return `{tostring(ok1)}/{s1} then {tostring(ok2)}/{s2}, balance={Ledger_.balance(state, "p")}`
+			end)(),
+		}
+	end)
+
+	-- M6-6 acceptance: force a config pull and report what happened. Run it
+	-- with the backend stopped to see defaults survive with no error.
+	Diagnostics.register("economyPullConfig", function()
+		local adopted = EconomyService.pullConfig()
+		return { adopted = adopted, info = EconomyService.describe() }
 	end)
 
 	-- M5-4 acceptance: two coordinators racing to claim the same queue

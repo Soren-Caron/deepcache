@@ -18,6 +18,14 @@ return {
 	baseUrl = "http://127.0.0.1:8787",
 	ingestPath = "/v1/ingest",
 	directorPath = "/v1/director/tick",
+	configPath = "/v1/config",
+	--- How often a server re-pulls economy config. The controller publishes at
+	--- most once a night, so this only needs to be well under "a shift" --
+	--- docs/10's M6 exit says servers pick up a change within 10 minutes.
+	configPollSeconds = 300,
+	--- Short: a config pull is never urgent (there is always a working config
+	--- already in hand), so it should never sit holding a thread.
+	configTimeoutSeconds = 5,
 	--- Slack above the backend's own internal 1200ms Ollama timeout (M4-3),
 	--- not a repeat of that number: this covers network + JSON round trip on
 	--- top of a budget the backend has already enforced on its side. Not the
