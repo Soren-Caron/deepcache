@@ -240,6 +240,34 @@ local function damageEntity(
 		died = died,
 		hitPos = Wire.toVector3(hitPoint),
 	})
+
+	if died then
+		-- M7-4. Fired to ALL clients, not just the shooter: everyone in the
+		-- fight should see the body. docs/08 keeps ragdoll physics entirely
+		-- client-side, so this carries only what each client needs to start
+		-- its own simulation. Two players ending up with different poses is
+		-- expected and costs nothing, because nothing in the game reads corpse
+		-- position.
+		--
+		-- The impulse direction is derived from the hit geometry that is
+		-- already here -- centre minus impact point, which runs from the
+		-- surface the round struck into the body, i.e. roughly the way the
+		-- round was travelling. Threading the shot direction down through the
+		-- whole damage call chain would touch every caller to deliver one
+		-- vector that can be reconstructed on the spot.
+		local impact = Types.subVec3(entity.pos, hitPoint)
+		local impulseDir = if Types.magnitude(impact) > 1e-4
+			then Types.normalize(impact)
+			else Types.vec3(0, 1, 0)
+		Remotes.event("Ragdoll"):FireAllClients({
+			entityId = entity.id,
+			kind = entity.kind,
+			deathPos = Wire.toVector3(entity.pos),
+			deathDir = Wire.toVector3(impulseDir),
+			impulseMag = applied,
+			killerWeapon = weaponId,
+		})
+	end
 	return applied, died
 end
 

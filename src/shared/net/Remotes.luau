@@ -57,6 +57,14 @@ local DECLARATIONS: { [string]: RemoteKind } = {
 	--- Server -> client, ~1Hz. Clock, pad states, squad status for the HUD.
 	RunState = "Reliable",
 
+	--- Server -> client. One entity died: where, which way it was hit, and how
+	--- hard. docs/08: ragdoll physics is client-only and never replicated, so
+	--- this carries just enough for each client to run its own simulation.
+	--- Two players seeing different corpse poses is correct and costs nothing.
+	--- Reliable because a dropped death event leaves an entity that vanishes
+	--- with no body, which reads as a despawn bug rather than a kill.
+	Ragdoll = "Reliable",
+
 	--- Client -> server. Place, cancel, or refresh a market order. Every field
 	--- is validated server-side; the client is asking, not telling. Reliable
 	--- because a dropped request leaves escrow the player believes they moved
