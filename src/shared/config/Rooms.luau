@@ -161,5 +161,167 @@ return {
 				{ face = "E", size = "small" },
 			},
 		},
+
+		-- ------------------------------------------------------------------
+		-- M7-9: the remaining 12 modules, taking the catalogue from 12 to 24.
+		--
+		-- Authored to widen the assembler's *choice*, not just to add mass.
+		-- With only 12 modules the no-repeat-within-2-hops rule leaves very
+		-- few legal candidates at each step, so layouts converge on a handful
+		-- of shapes and the 1,000-seed sweep is really testing the same dozen
+		-- arrangements over and over. What varies here is deliberate:
+		--
+		--   * connector *count* (2, 3 and 4-way) so the graph can branch and
+		--     rejoin rather than mostly chaining,
+		--   * connector *size* mix, since small only mates with small -- a
+		--     catalogue heavy on `large` quietly makes small connectors dead
+		--     ends,
+		--   * footprint spread from 32x32 up to 128x96, so the area steering
+		--     has both fine and coarse increments to hit +/-15% with.
+		--
+		-- No new pad rooms: three pads at 3:00/6:00/9:00 is a run-pacing
+		-- decision from docs/01, not a level-geometry one, and adding a fourth
+		-- because there was space would change how the run plays.
+		--
+		-- **Measured, and worth knowing before authoring module 25.** Going
+		-- 12 -> 24 modules raised distinct layouts across 400 seeds from 250
+		-- to 349, about +40%. But roughly four modules are never placed at
+		-- all, and that is structural rather than an authoring mistake:
+		-- `Assemble` scores candidates purely on how close their area is to
+		-- the remaining budget divided by the remaining module count (~4,250
+		-- studs^2 against a 68,000 target), so anything under ~2,000 studs^2
+		-- loses that comparison at every step of the walk and is never the
+		-- best fit. Which modules are dead therefore depends only on which
+		-- happen to be smallest.
+		--
+		-- Resizing them does not fix it, it relocates it. Measured, same 400
+		-- seeds: enlarging the two smallest additions to ~2,200 studs^2 left
+		-- the dead count at four (the next-smallest modules took their place)
+		-- and *cost* diversity, 349 -> 275, because mid-sized modules all
+		-- compete for the same slots. The small modules are kept at their
+		-- authored sizes because that configuration measured best.
+		--
+		-- The real fix is a variety term in the candidate score rather than
+		-- pure area-fit, which is a change to tested assembly logic and out of
+		-- scope for a catalogue task. Recorded in docs/metrics/m7.md.
+		-- ------------------------------------------------------------------
+
+		-- More connective tissue, all-zone. These carry the branching.
+		{
+			id = "Corridor_Long",
+			zones = { "Perimeter", "Processing", "Vault" },
+			width = 16, depth = 96, hasPad = false,
+			connectors = { { face = "N", size = "large" }, { face = "S", size = "large" } },
+		},
+		{
+			id = "Corridor_Narrow",
+			zones = { "Perimeter", "Processing", "Vault" },
+			width = 12, depth = 48, hasPad = false,
+			connectors = { { face = "N", size = "small" }, { face = "S", size = "small" } },
+		},
+		{
+			id = "Junction_Elbow",
+			zones = { "Perimeter", "Processing", "Vault" },
+			width = 32, depth = 32, hasPad = false,
+			connectors = { { face = "S", size = "large" }, { face = "E", size = "small" } },
+		},
+		{
+			id = "Service_Shaft",
+			zones = { "Perimeter", "Processing", "Vault" },
+			width = 24, depth = 24, hasPad = false,
+			connectors = {
+				{ face = "N", size = "small" },
+				{ face = "S", size = "small" },
+				{ face = "W", size = "small" },
+			},
+		},
+
+		-- Perimeter: open and bright. Wide footprints, mostly large mates.
+		{
+			id = "Perimeter_Motorpool",
+			zones = { "Perimeter" },
+			width = 112, depth = 72, hasPad = false,
+			connectors = {
+				{ face = "N", size = "large" },
+				{ face = "S", size = "large" },
+				{ face = "E", size = "large" },
+				{ face = "W", size = "small" },
+			},
+		},
+		{
+			id = "Perimeter_Checkpoint",
+			zones = { "Perimeter" },
+			width = 48, depth = 40, hasPad = false,
+			connectors = {
+				{ face = "N", size = "large" },
+				{ face = "S", size = "small" },
+				{ face = "W", size = "small" },
+			},
+		},
+
+		-- Processing: tight sightlines, vertical clutter.
+		{
+			id = "Processing_Kilns",
+			zones = { "Processing" },
+			width = 88, depth = 72, hasPad = false,
+			connectors = {
+				{ face = "N", size = "large" },
+				{ face = "S", size = "small" },
+				{ face = "W", size = "large" },
+			},
+		},
+		{
+			id = "Processing_Conveyor",
+			zones = { "Processing" },
+			width = 128, depth = 40, hasPad = false,
+			connectors = {
+				{ face = "N", size = "small" },
+				{ face = "S", size = "large" },
+				{ face = "E", size = "large" },
+			},
+		},
+		{
+			id = "Processing_Substation",
+			zones = { "Processing" },
+			width = 56, depth = 56, hasPad = false,
+			connectors = {
+				{ face = "N", size = "small" },
+				{ face = "E", size = "small" },
+				{ face = "W", size = "small" },
+			},
+		},
+
+		-- Vault: the deep band. Fewer, larger, more sealed.
+		{
+			id = "Vault_Reliquary",
+			zones = { "Vault" },
+			width = 96, depth = 88, hasPad = false,
+			connectors = {
+				{ face = "N", size = "large" },
+				{ face = "S", size = "small" },
+				{ face = "E", size = "large" },
+			},
+		},
+		{
+			id = "Vault_Cistern",
+			zones = { "Vault" },
+			width = 80, depth = 96, hasPad = false,
+			connectors = {
+				{ face = "N", size = "small" },
+				{ face = "S", size = "large" },
+				{ face = "W", size = "large" },
+				{ face = "E", size = "small" },
+			},
+		},
+		{
+			id = "Vault_Antechamber",
+			zones = { "Vault" },
+			width = 48, depth = 48, hasPad = false,
+			connectors = {
+				{ face = "N", size = "large" },
+				{ face = "S", size = "small" },
+				{ face = "W", size = "small" },
+			},
+		},
 	},
 }
