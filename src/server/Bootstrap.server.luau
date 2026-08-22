@@ -374,6 +374,55 @@ local function main()
 	Diagnostics.register("economyInfo", EconomyService.describe)
 	Diagnostics.register("marketInfo", MarketService.describe)
 
+	-- M7-5 acceptance needs screenshots taken *in* each zone, and walking
+	-- there takes minutes. Repositioning has to forgive the movement guard on
+	-- every frame it holds the player, for the reason MovementGuardService.
+	-- forgive documents: the guard cannot tell a server teleport from a client
+	-- one by looking at positions, so a legitimate reposition reads as exactly
+	-- the signature it exists to catch. Same pattern as extractProbe above.
+	Diagnostics.register("teleportToZone", function(zone: string?)
+		local target = zone or "Vault"
+		local player = Players:GetPlayers()[1]
+		if player == nil then
+			return { error = "no player connected" }
+		end
+		local character = player.Character
+		local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+		if rootPart == nil or not rootPart:IsA("BasePart") then
+			return { error = "no character" }
+		end
+		local layout = LevelService.getLayout()
+		if layout == nil then
+			return { error = "no layout" }
+		end
+
+		-- The largest module in the band, so the camera has room and the shot
+		-- is not a close-up of a wall.
+		local best: any = nil
+		for _, placed in layout.modules do
+			if placed.zone == target and (best == nil or placed.area > best.area) then
+				best = placed
+			end
+		end
+		if best == nil then
+			return { error = `no module in zone {target}` }
+		end
+
+		local destination = Vector3.new(best.at.x, 8, best.at.z)
+		for _ = 1, 16 do
+			rootPart.CFrame = CFrame.new(destination)
+			MovementGuardService.forgive(player)
+			task.wait(0.05)
+		end
+		return {
+			zone = target,
+			moduleId = best.id,
+			at = { x = math.floor(destination.X), z = math.floor(destination.Z) },
+			zoneAtDestination = LevelService.zoneAt(rootPart.Position),
+			movement = MovementGuardService.getMetrics(),
+		}
+	end)
+
 	-- M6-10 acceptance: list, bid, fill, cancel, driven against the real
 	-- MarketService with a real connected player, and checked for
 	-- conservation at the end. Exercises the server path the UI calls, so a

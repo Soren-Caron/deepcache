@@ -304,6 +304,17 @@ function RunLifecycleService.step(tick: number, dt: number)
 		sincePush = 0
 		for _, player in Players:GetPlayers() do
 			local runPlayer = current.players[player.UserId]
+			-- M7-5: the client drives its lighting transitions off this. The
+			-- server sends the zone *name* rather than the client deriving it,
+			-- because only the server has the layout -- and shipping the whole
+			-- module list to every client just so it can do a point-in-rect
+			-- test would be a lot of bandwidth for one string.
+			local zone: string? = nil
+			local character = player.Character
+			local root = character and character:FindFirstChild("HumanoidRootPart")
+			if root and root:IsA("BasePart") then
+				zone = LevelService.zoneAt(root.Position)
+			end
 			Remotes.event("RunState"):FireClient(player, {
 				remaining = Run.secondsRemaining(current),
 				elapsed = current.elapsedSeconds,
@@ -312,6 +323,7 @@ function RunLifecycleService.step(tick: number, dt: number)
 				active = Run.activeCount(current),
 				startingHeadcount = current.startingHeadcount,
 				complete = current.complete,
+				zone = zone,
 			})
 		end
 	end

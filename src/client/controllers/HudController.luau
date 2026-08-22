@@ -22,19 +22,18 @@
 
 	**M4-9 addition.** `RunEvent` carries `kind = "overseerBark"` messages
 	(server-filtered, per docs/05 §Content filtering -- nothing here ever
-	sees or could show unfiltered text). `threatTier` [1,5] drives a
-	`ColorCorrectionEffect` under `Lighting`: contrast and saturation climb
-	and the tint shifts warmer as tier rises, tweened rather than snapped so
-	a tier change reads as escalation, not a flicker.
+	sees or could show unfiltered text). `threatTier` [1,5] still drives the
+	lighting, but as of M7-5 this file forwards it to `LookController` rather
+	than writing `ColorCorrectionEffect` itself -- see the note further down
+	for why one owner per property is load-bearing here.
 ]]
 
-local Lighting = game:GetService("Lighting")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local TweenService = game:GetService("TweenService")
 local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 
 local Remotes = require(Shared.net.Remotes)
+local LookController = require("./LookController")
 local EconomyConfig = require(Shared.config.Economy)
 local ZonesConfig = require(Shared.config.Zones)
 local Branding = require(Shared.config.Branding)
@@ -53,20 +52,18 @@ local ALERT = Color3.fromRGB(235, 110, 90)
 local GOOD = Color3.fromRGB(120, 210, 150)
 local COMMS_COLOR = Color3.fromRGB(180, 200, 235)
 
---- docs/05: threatTier [1,5] drives lighting. Calm and cool at 1, saturated
---- and warm at 5 -- tuned to be visibly, not subtly, different at the
---- extremes, since "threat tier 5 visibly shifts the post stack" is the
---- literal M4-9 acceptance criterion.
-local TIER_TINT: { [number]: Color3 } = {
-	[1] = Color3.fromRGB(205, 220, 235),
-	[2] = Color3.fromRGB(220, 220, 215),
-	[3] = Color3.fromRGB(235, 210, 190),
-	[4] = Color3.fromRGB(240, 175, 150),
-	[5] = Color3.fromRGB(255, 120, 100),
-}
-local TIER_CONTRAST: { [number]: number } = { [1] = -0.1, [2] = -0.02, [3] = 0.06, [4] = 0.18, [5] = 0.32 }
-local TIER_SATURATION: { [number]: number } = { [1] = -0.2, [2] = -0.05, [3] = 0.05, [4] = 0.18, [5] = 0.35 }
-local TIER_TWEEN_INFO = TweenInfo.new(2.5, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+--- M7-5: the threat-tier tint/contrast/saturation tables that used to live
+--- here are gone, and so is this file's ColorCorrectionEffect. They moved to
+--- core/look/LightingBlend and client/controllers/LookController, which now
+--- owns the entire post-processing stack.
+---
+--- The reason is not tidiness. M7-5 drives the same ColorCorrection from the
+--- per-zone lighting preset, and two writers on one property means whichever
+--- tween finishes last wins -- the stack would flicker between the zone
+--- answer and the threat answer. That is the failure this file's own header
+--- warns about: two sources for one number is how a HUD ends up confidently
+--- lying. The tier still reaches the lighting, via LookController.setThreatTier
+--- below, where it is composed with the zone preset instead of fighting it.
 local COMMS_DISPLAY_SECONDS = 10
 
 local gui: ScreenGui? = nil
@@ -77,7 +74,6 @@ local padLabel: TextLabel
 local statusLabel: TextLabel
 local vitalsLabel: TextLabel
 local commsLabel: TextLabel
-local colorCorrection: ColorCorrectionEffect
 local commsHideAt = 0
 
 local latest = {
@@ -149,15 +145,6 @@ end
 --- Tweened, not snapped, so an escalation reads as a shift, not a flicker --
 --- and clamped, since a garbage tier must still resolve to *some* real
 --- lighting state rather than erroring the HUD.
-local function applyThreatTier(tier: number)
-	local clamped = math.clamp(math.floor(tier + 0.5), 1, 5)
-	TweenService:Create(colorCorrection, TIER_TWEEN_INFO, {
-		TintColor = TIER_TINT[clamped],
-		Contrast = TIER_CONTRAST[clamped],
-		Saturation = TIER_SATURATION[clamped],
-	}):Play()
-end
-
 local function render()
 	if commsLabel.Visible and os.clock() > commsHideAt then
 		commsLabel.Visible = false
@@ -258,19 +245,10 @@ function HudController.start()
 	commsLabel.RichText = false -- server text is filtered, not markup-safe; never interpret it as rich text
 	commsLabel.Visible = false
 
-	-- M4-9 threat-tier lighting hook. Reuses an existing effect if the level
-	-- (or Studio authoring) already has one rather than creating a duplicate
-	-- that would fight it for the same visual slot.
-	local existingEffect = Lighting:FindFirstChildOfClass("ColorCorrectionEffect")
-	if existingEffect then
-		colorCorrection = existingEffect
-	else
-		local created = Instance.new("ColorCorrectionEffect")
-		created.Name = "OverseerThreatTier"
-		created.Parent = Lighting
-		colorCorrection = created
-	end
-	applyThreatTier(2) -- BUILD's baseline tier, so the level doesn't start mid-tween from defaults
+	-- M4-9's threat-tier lighting is still driven, but by LookController now;
+	-- see the note where the tier tables used to be. BUILD's baseline tier is
+	-- set here so the level does not open at whatever the default happens to be.
+	LookController.setThreatTier(2)
 
 	Remotes.event("RunEvent").OnClientEvent:Connect(function(payload: any)
 		if typeof(payload) ~= "table" or payload.kind ~= "overseerBark" then
@@ -283,7 +261,7 @@ function HudController.start()
 			commsHideAt = os.clock() + COMMS_DISPLAY_SECONDS
 		end
 		if typeof(payload.threatTier) == "number" then
-			applyThreatTier(payload.threatTier)
+			LookController.setThreatTier(payload.threatTier)
 		end
 	end)
 
@@ -297,6 +275,12 @@ function HudController.start()
 		latest.status = payload.status or latest.status
 		latest.active = payload.active or 0
 		latest.complete = payload.complete == true
+		-- M7-5: zone drives the lighting transition. setZone is a no-op when
+		-- the zone has not changed, so forwarding it at the RunState cadence
+		-- (~1Hz) costs nothing and does not restart the 1.5s blend.
+		if typeof(payload.zone) == "string" then
+			LookController.setZone(payload.zone)
+		end
 	end)
 
 	Remotes.event("CarryUpdate").OnClientEvent:Connect(function(payload: any)

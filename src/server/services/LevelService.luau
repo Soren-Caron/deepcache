@@ -316,6 +316,34 @@ function LevelService.spawnPointsFor(zone: string): { Types.Vec3 }
 	return spawnPoints[zone] or {}
 end
 
+--- Which zone band a world position sits in, or nil if it is outside every
+--- module. Drives the client's lighting transitions (M7-5).
+---
+--- Point-in-rect against the placed modules rather than a distance-to-centre
+--- nearest search: modules vary from 32x32 to 128x96, so the nearest *centre*
+--- to a point standing at the edge of a large room is frequently the centre of
+--- a small neighbouring one, and the lighting would flip zones while the
+--- player stood still. Containment has no such ambiguity, because modules do
+--- not overlap by construction.
+function LevelService.zoneAt(position: Vector3): string?
+	local layout = currentLayout
+	if layout == nil then
+		return nil
+	end
+	for _, placed in layout.modules do
+		local halfWidth, halfDepth = placed.width / 2, placed.depth / 2
+		if
+			position.X >= placed.at.x - halfWidth
+			and position.X <= placed.at.x + halfWidth
+			and position.Z >= placed.at.z - halfDepth
+			and position.Z <= placed.at.z + halfDepth
+		then
+			return placed.zone
+		end
+	end
+	return nil
+end
+
 --- Nearest waypoint to a world position, for entity pathing.
 function LevelService.waypointAt(position: Vector3): number?
 	local layout = currentLayout

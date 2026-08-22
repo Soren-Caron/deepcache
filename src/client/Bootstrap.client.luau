@@ -15,9 +15,13 @@ local PredictionController = require("./controllers/PredictionController")
 local HudController = require("./controllers/HudController")
 local CorrectionController = require("./controllers/CorrectionController")
 local MarketController = require("./controllers/MarketController")
+local LookController = require("./controllers/LookController")
 
 local function main()
 	EntityRenderer.start()
+	-- Before the HUD, which sets the baseline threat tier through
+	-- LookController and so needs its effects to already exist.
+	LookController.start()
 	HudController.start()
 	CorrectionController.start()
 	MarketController.start()
@@ -45,7 +49,7 @@ local function main()
 
 	PredictionController.start()
 
-	print(`[{Branding.gameName}] client up — entities, prediction, HUD, corrections, market`)
+	print(`[{Branding.gameName}] client up — entities, prediction, HUD, corrections, market, look`)
 end
 
 main()
