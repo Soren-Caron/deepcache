@@ -71,11 +71,11 @@ t.describe("core module surface", function()
 		expect(modules.Snapshot.capacity()).toEqual(81)
 	end)
 
-	t.it("stubs fail loudly rather than returning nil", function()
-		expect(function()
-			modules.TwoBoneIk.solve({ x = 0, y = 0, z = 0 }, { x = 1, y = 0, z = 0 }, 1, 1, { x = 0, y = 1, z = 0 })
-		end).toThrow("unimplemented")
-	end)
+	-- The "stubs fail loudly rather than returning nil" case that lived here
+	-- since M0 is gone, because as of M7-1/M7-2 there are no stubs left in
+	-- core/ to point it at -- `grep -rn unimplemented src/shared/core` is
+	-- empty. Keeping it would have meant re-pointing it at an implemented
+	-- module and asserting something that is no longer true.
 end)
 
 -- Worklist -------------------------------------------------------------------
@@ -114,7 +114,3 @@ end)
 -- backend recommender worker, verified via Studio and vitest respectively.
 
 
-t.describe("M7 presentation", function()
-	t.todo("TwoBoneIk: reachable / exact / unreachable / degenerate")
-	t.todo("StepPlanner: opposing legs never lift together")
-end)
