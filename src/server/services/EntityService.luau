@@ -10,6 +10,7 @@
 
 local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 
+local CombatConfig = require(Shared.config.Combat)
 local EnemiesConfig = require(Shared.config.Enemies)
 local NetcodeConfig = require(Shared.config.Netcode)
 local EntityState = require(Shared.core.sim.EntityState)
@@ -282,10 +283,43 @@ function EntityService.step(tick: number, dt: number)
 
 		local distance = Types.distance(entity.pos, target)
 
+		-- Hoisted above the attack branch: an attacking crowd still needs to
+		-- unstack, so separation can no longer be exclusive to `move`.
+		local neighbours: { Types.Vec3 } = {}
+		for otherIndex, otherPos in positions do
+			if otherIndex ~= index then
+				table.insert(neighbours, otherPos)
+			end
+		end
+
+		--- How close this entity may get to the target's centre before it is
+		--- standing inside them. Also the floor below which the direction *to*
+		--- the target stops being a usable facing: at half a stud, sub-stud
+		--- movement swings that angle through tens of degrees per tick.
+		local personalSpace = entity.hitboxRadius + CombatConfig.PLAYER_RADIUS
+
+		local function faceTarget()
+			local desired = Steering.facingYaw(Types.subVec3(target, entity.pos), entity.yaw, personalSpace)
+			entity.yaw = Steering.slewYaw(entity.yaw, desired, config.turnRate, dt)
+		end
+
 		if distance <= config.atkRange then
 			EntityState.transition(entity, "attack")
-			entity.vel = { x = 0, y = 0, z = 0 }
-			entity.yaw = Steering.facingYaw(Types.subVec3(target, entity.pos), entity.yaw)
+
+			-- Previously this zeroed velocity and skipped steering entirely, so
+			-- a crowd a moving player walked into stayed interpenetrated
+			-- forever -- nothing was left to push it apart. An attacker still
+			-- gets to adjust its footing, at a fraction of its speed.
+			local separate = Steering.separate(entity.pos, neighbours, entity.hitboxRadius * 2.5)
+			local offTarget = Steering.separate(entity.pos, { target }, personalSpace)
+			local shuffle = Steering.combine({
+				{ force = Types.scaleVec3(separate, config.speed), weight = 0.8 },
+				{ force = Types.scaleVec3(offTarget, config.speed), weight = 1.0 },
+			}, config.speed * CombatConfig.ATTACK_SHUFFLE_FRACTION)
+
+			entity.vel = shuffle
+			entity.pos = Types.addVec3(entity.pos, Types.scaleVec3(shuffle, dt))
+			faceTarget()
 			continue
 		end
 
@@ -295,18 +329,11 @@ function EntityService.step(tick: number, dt: number)
 		if behavior == "Static" then
 			EntityState.transition(entity, "idle")
 			entity.vel = { x = 0, y = 0, z = 0 }
-			entity.yaw = Steering.facingYaw(Types.subVec3(target, entity.pos), entity.yaw)
+			faceTarget()
 			continue
 		end
 
 		EntityState.transition(entity, "move")
-
-		local neighbours: { Types.Vec3 } = {}
-		for otherIndex, otherPos in positions do
-			if otherIndex ~= index then
-				table.insert(neighbours, otherPos)
-			end
-		end
 
 		-- Route around walls, then steer the last few studs.
 		local waypoint = routedTarget(entity, target)
@@ -330,7 +357,15 @@ function EntityService.step(tick: number, dt: number)
 
 		entity.vel = velocity
 		entity.pos = Types.addVec3(entity.pos, Types.scaleVec3(velocity, dt))
-		entity.yaw = Steering.facingYaw(velocity, entity.yaw)
+		-- Rate-limited like the others: a seek force that reverses between
+		-- ticks (rounding a corner, or separation winning briefly) would
+		-- otherwise snap the entity through 180 degrees in one frame.
+		entity.yaw = Steering.slewYaw(
+			entity.yaw,
+			Steering.facingYaw(velocity, entity.yaw),
+			config.turnRate,
+			dt
+		)
 	end
 
 	for _, id in reap do

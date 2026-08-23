@@ -224,9 +224,9 @@ local function main()
 			local e = EntityService.get(view.id)
 			if e then
 				table.insert(rows, string.format(
-					"id=%d kind=%s state=%s hp=%.0f/%.0f pos=(%.1f,%.1f,%.1f) vel=(%.2f,%.2f,%.2f)",
+					"id=%d kind=%s state=%s hp=%.0f/%.0f pos=(%.1f,%.1f,%.1f) vel=(%.2f,%.2f,%.2f) yaw=%.4f",
 					e.id, e.kind, e.state, e.hp, e.maxHp,
-					e.pos.x, e.pos.y, e.pos.z, e.vel.x, e.vel.y, e.vel.z
+					e.pos.x, e.pos.y, e.pos.z, e.vel.x, e.vel.y, e.vel.z, e.yaw
 				))
 			end
 		end

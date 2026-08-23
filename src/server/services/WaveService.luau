@@ -122,6 +122,26 @@ local function deepestPlayerZone(): string?
 	return best
 end
 
+--- Lift a floor-level spawn point to a body centre.
+---
+--- `LevelService.spawnPointsFor` returns points at `y = 0`, the floor plane,
+--- and consumers offset — `LootService` does the same with its own `+1.6`.
+--- An entity's position is its *centre*: the hit-detection sphere is centred
+--- there, and the client centres its part there too. Spawning at the floor
+--- therefore buried every entity to the waist and left the top half of the
+--- visible body outside its own hitbox.
+---
+--- The offset is `hitboxRadius`, so the sphere rests tangent to the floor
+--- rather than through it. The client still draws a fixed 3-stud box for every
+--- kind (the snapshot has no room for a kind byte inside the 11-byte-per-entity
+--- budget), so kinds with a radius far from 1.5 look slightly high or low until
+--- per-kind rigs land with M7-3/M7-6.
+local function grounded(kind: string, at: Types.Vec3): Types.Vec3
+	local config = (EnemiesConfig :: any)[kind]
+	local lift = if config ~= nil then config.hitboxRadius else 1.5
+	return Types.vec3(at.x, at.y + lift, at.z)
+end
+
 --- Live entities by kind, and the total. Corpses are excluded from both: a
 --- body on the floor is not pressure, and counting it would let a pile of
 --- corpses hold the population ceiling closed and starve the wave.
@@ -207,7 +227,7 @@ function WaveService.step(tick: number, dt: number)
 
 	local spawns = WaveScheduler.trim(plan.spawns, outcome.maxSpawns)
 	for _, spawn in spawns do
-		EntityService.spawn(spawn.kind, spawn.at, tick)
+		EntityService.spawn(spawn.kind, grounded(spawn.kind, spawn.at), tick)
 	end
 	metrics.waves += 1
 	metrics.spawned += #spawns
@@ -222,7 +242,7 @@ function WaveService.step(tick: number, dt: number)
 		and #spawns < outcome.maxSpawns
 	then
 		local point = points[Rng.nextRange(rng, 1, #points)]
-		EntityService.spawn("Reclaimer", Types.vec3(point.x, point.y, point.z), tick)
+		EntityService.spawn("Reclaimer", grounded("Reclaimer", point), tick)
 		metrics.reclaimersSummoned += 1
 		metrics.spawned += 1
 	end
