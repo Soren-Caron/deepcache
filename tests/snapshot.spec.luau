@@ -12,10 +12,15 @@ local ORIGIN = Types.vec3(0, 0, 0)
 local OFFSET_ORIGIN = Types.vec3(1000, -50, -2000)
 
 local STATES: { Types.EntityStateName } = { "idle", "move", "attack", "stagger", "death", "spawn" }
+local KINDS: { Types.EntityKind } =
+	{ "Skitter", "Sentry", "Hauler", "Lancer", "Warden", "Reclaimer" }
 
 local function view(id: number, x: number, y: number, z: number, yaw: number?, state: Types.EntityStateName?, hp: number?): Types.EntityView
 	return {
 		id = id,
+		-- Kind rides in the spare bits of the state byte. Varied by id rather
+		-- than fixed, so a packing bug that leaks kind into state shows up.
+		kind = KINDS[(id % #KINDS) + 1],
 		pos = Types.vec3(x, y, z),
 		yaw = yaw or 0,
 		state = state or "idle",
@@ -113,6 +118,71 @@ t.describe("net/Snapshot format", function()
 		local rng = Rng.new(3)
 		local b = Snapshot.encode(1, randomViews(rng, 81, 1600), ORIGIN)
 		expect(buffer.len(b) <= 1000).toBeTruthy()
+	end)
+end)
+
+t.describe("net/Snapshot kind packing", function()
+	-- Kind shares the state byte (bits 3-5) with state (bits 0-2). The whole
+	-- risk of that is one field leaking into the other, so the coverage is the
+	-- full cross product rather than a couple of samples.
+	t.it("roundtrips every kind against every state", function()
+		for _, kind in KINDS do
+			for _, state in STATES do
+				local v: Types.EntityView =
+					{ id = 7, kind = kind, pos = Types.vec3(1, 2, 3), yaw = 0, state = state, hpPct = 1 }
+				local back = Snapshot.fromRecord(Snapshot.toRecord(v, ORIGIN), ORIGIN)
+				expect(back.kind).toEqual(kind)
+				expect(back.state).toEqual(state)
+			end
+		end
+	end)
+
+	t.it("costs no extra bytes", function()
+		-- The entire reason for packing rather than adding a twelfth byte. At
+		-- the 32-entity interest cap a twelfth byte is 640 B/s per client.
+		expect(Snapshot.ENTITY_BYTES).toEqual(11)
+		local views = { view(1, 0, 0, 0), view(2, 5, 0, 5) }
+		expect(buffer.len(Snapshot.encode(1, views, ORIGIN, true)))
+			.toEqual(Snapshot.HEADER_BYTES + 2 * Snapshot.ENTITY_BYTES)
+	end)
+
+	t.it("survives a full encode/decode through the buffer, not just toRecord", function()
+		local views: { Types.EntityView } = {}
+		for index, kind in KINDS do
+			table.insert(views, {
+				id = index,
+				kind = kind,
+				pos = Types.vec3(index * 3, 0, index),
+				yaw = 0,
+				state = STATES[(index % #STATES) + 1],
+				hpPct = 1,
+			})
+		end
+		local decoded = Snapshot.decode(Snapshot.encode(1, views, ORIGIN, true), ORIGIN)
+		for index, kind in KINDS do
+			expect(decoded.entities[index].kind).toEqual(kind)
+			expect(decoded.entities[index].state).toEqual(STATES[(index % #STATES) + 1])
+		end
+	end)
+
+	t.it("treats a kind change as a change worth sending", function()
+		-- Not expected in practice -- an entity does not change species -- but
+		-- if the packing silently dropped kind, delta comparison would report
+		-- two different entities as identical.
+		local a = { view(1, 0, 0, 0) }
+		local b: { Types.EntityView } =
+			{ { id = 1, kind = "Warden", pos = Types.vec3(0, 0, 0), yaw = 0, state = "idle", hpPct = 1 } }
+		local ra = Snapshot.toRecord(a[1], ORIGIN)
+		local rb = Snapshot.toRecord(b[1], ORIGIN)
+		expect(Snapshot.recordsEqual(ra, rb)).toBeFalsy()
+	end)
+
+	t.it("rejects an unknown kind rather than encoding garbage", function()
+		local bad: any =
+			{ id = 1, kind = "Dragon", pos = Types.vec3(0, 0, 0), yaw = 0, state = "idle", hpPct = 1 }
+		expect(function()
+			Snapshot.toRecord(bad, ORIGIN)
+		end).toThrow("unknown kind")
 	end)
 end)
 

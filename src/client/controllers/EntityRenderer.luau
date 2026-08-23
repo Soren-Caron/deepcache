@@ -16,6 +16,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 
+local EnemiesConfig = require(Shared.config.Enemies)
 local NetcodeConfig = require(Shared.config.Netcode)
 local Interpolator = require(Shared.core.net.Interpolator)
 local Snapshot = require(Shared.core.net.Snapshot)
@@ -35,6 +36,41 @@ local COLORS: { [string]: Color3 } = {
 	Warden = Color3.fromRGB(190, 120, 210),
 	Reclaimer = Color3.fromRGB(230, 60, 60),
 }
+
+--- Silhouette per kind. Height and bulk read at a glance where a colour swatch
+--- does not, especially at distance and in the Vault's heavy fog. Derived from
+--- `hitboxRadius` so what you see is what the server will let you shoot.
+local KIND_SIZE: { [string]: Vector3 } = {}
+for kind, config in EnemiesConfig :: any do
+	local r = config.hitboxRadius
+	KIND_SIZE[kind] = Vector3.new(r * 1.25, r * 1.9, r * 1.25)
+end
+local DEFAULT_SIZE = Vector3.new(2, 3, 2)
+
+--- Material carries the fiction: the swarm is soft, the turret is metal, the
+--- Warden is armoured.
+local KIND_MATERIAL: { [string]: Enum.Material } = {
+	Skitter = Enum.Material.SmoothPlastic,
+	Sentry = Enum.Material.DiamondPlate,
+	Hauler = Enum.Material.Metal,
+	Lancer = Enum.Material.Foil,
+	Warden = Enum.Material.Slate,
+	Reclaimer = Enum.Material.CorrodedMetal,
+}
+
+local HIT_FLASH_SECONDS = 0.08
+local HIT_FLASH_COLOR = Color3.fromRGB(255, 250, 235)
+local WOUNDED_COLOR = Color3.fromRGB(70, 20, 18)
+local DEATH_FADE_SECONDS = 0.9
+
+type Visual = { lastHp: number, flashUntil: number, deathAt: number }
+local visuals: { [number]: Visual } = {}
+
+local function applyKindLook(part: BasePart, kind: string)
+	part.Color = COLORS[kind] or COLORS.Skitter
+	part.Material = KIND_MATERIAL[kind] or Enum.Material.SmoothPlastic
+	part.Size = KIND_SIZE[kind] or DEFAULT_SIZE
+end
 
 local interp = Interpolator.new()
 local origin: Types.Vec3 = { x = 0, y = 0, z = 0 }
@@ -168,6 +204,9 @@ local function release(id: number)
 		return
 	end
 	active[id] = nil
+	-- Cleared with the part, not left behind: a stale entry would make a
+	-- recycled id inherit the previous occupant's health and flash on spawn.
+	visuals[id] = nil
 	part.Parent = nil
 	table.insert(pool, part)
 end
@@ -287,8 +326,11 @@ local function render(dt: number)
 		if part == nil then
 			part = acquire()
 			part.Name = `Entity_{id}`
-			part.Color = COLORS.Skitter
+			-- Kind now arrives in the snapshot's spare state bits, so a Warden
+			-- no longer renders as the same grey box as a Skitter.
+			applyKindLook(part, sample.kind)
 			active[id] = part
+			visuals[id] = { lastHp = sample.hpPct, flashUntil = 0, deathAt = 0 }
 			locomotion[id] = {
 				gait = StepPlanner.new(LEG_OFFSETS, LEG_GROUPS),
 				lastPos = Types.vec3(sample.pos.x, sample.pos.y, sample.pos.z),
@@ -296,9 +338,57 @@ local function render(dt: number)
 			}
 		end
 
+		local look = visuals[id]
+		local now = os.clock()
+
+		-- Took damage since the last frame: flash. Without this there is no
+		-- feedback that a shot connected -- the enemy just silently has less
+		-- health, which reads as the weapon not working.
+		if look ~= nil and sample.hpPct < look.lastHp - 1e-4 then
+			look.flashUntil = now + HIT_FLASH_SECONDS
+		end
+		if look ~= nil then
+			look.lastHp = sample.hpPct
+		end
+
+		local baseSize = KIND_SIZE[sample.kind] or DEFAULT_SIZE
+		local scale, transparency = 1, 0
+
+		if sample.state == "death" then
+			-- Corpses collapse and fade over their lifetime rather than
+			-- blinking out, so a kill reads as a kill.
+			if look ~= nil and look.deathAt == 0 then
+				look.deathAt = now
+			end
+			local age = if look ~= nil then now - look.deathAt else 0
+			local t = math.clamp(age / DEATH_FADE_SECONDS, 0, 1)
+			scale = 1 - 0.55 * t
+			transparency = 0.15 + 0.75 * t
+		elseif sample.state == "spawn" then
+			-- Materialise instead of popping in.
+			scale = 0.6
+			transparency = 0.5
+		end
+
+		part.Size = baseSize * scale
+		part.Transparency = transparency
+
+		if look ~= nil and now < look.flashUntil then
+			part.Color = HIT_FLASH_COLOR
+			part.Material = Enum.Material.Neon
+		else
+			part.Color = COLORS[sample.kind] or COLORS.Skitter
+			part.Material = KIND_MATERIAL[sample.kind] or Enum.Material.SmoothPlastic
+		end
+
+		-- Damage tint: darken toward the low-health colour as it bleeds out, so
+		-- a nearly-dead enemy is worth pushing rather than guessing about.
+		if sample.state ~= "death" and look ~= nil and now >= look.flashUntil and sample.hpPct < 0.999 then
+			part.Color = part.Color:Lerp(WOUNDED_COLOR, (1 - sample.hpPct) * 0.6)
+		end
+
 		part.CFrame = CFrame.new(sample.pos.x, sample.pos.y, sample.pos.z)
 			* CFrame.Angles(0, sample.yaw, 0)
-		part.Transparency = if sample.state == "death" then 0.6 else 0
 
 		table.insert(candidates, {
 			id = id,
@@ -405,6 +495,24 @@ function EntityRenderer.start()
 		end
 		local info = EntityRenderer.getProfile()
 		info.stats = EntityRenderer.getStats()
+
+		-- Where entities are lost between the wire and the screen. The three
+		-- counts should agree; whichever one drops first names the layer.
+		info.baselineCount = #baseline
+		local known = Interpolator.knownIds(interp)
+		info.knownIdCount = #known
+		local sampled, renderTime = 0, workspace:GetServerTimeNow() - interp.renderDelay
+		local perId: { string } = {}
+		for _, id in known do
+			local s = Interpolator.sample(interp, id, renderTime)
+			if s ~= nil then
+				sampled += 1
+			end
+			table.insert(perId, string.format("%d:%s", id, if s ~= nil then "ok" else "NIL"))
+		end
+		info.sampledCount = sampled
+		info.perId = perId
+		info.renderDelay = interp.renderDelay
 		return info
 	end
 	bridge.Parent = Players.LocalPlayer

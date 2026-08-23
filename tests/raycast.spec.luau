@@ -10,7 +10,7 @@ local v3 = Types.vec3
 local FORWARD = v3(0, 0, 1)
 
 local function view(id: number, x: number, y: number, z: number, state: Types.EntityStateName?): Types.EntityView
-	return { id = id, pos = v3(x, y, z), yaw = 0, state = state or "move", hpPct = 1 }
+	return { id = id, kind = "Skitter" :: any, pos = v3(x, y, z), yaw = 0, state = state or "move", hpPct = 1 }
 end
 
 t.describe("sim/Raycast raySphere", function()

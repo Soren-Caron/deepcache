@@ -11,7 +11,7 @@ local Types = require("../src/shared/core/Types")
 local v3 = Types.vec3
 
 local function view(id: number, x: number, z: number): Types.EntityView
-	return { id = id, pos = v3(x, 0, z), yaw = 0, state = "move", hpPct = 1 }
+	return { id = id, kind = "Skitter" :: any, pos = v3(x, 0, z), yaw = 0, state = "move", hpPct = 1 }
 end
 
 --------------------------------------------------------------------------------

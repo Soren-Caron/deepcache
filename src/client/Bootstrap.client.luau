@@ -10,6 +10,7 @@
 local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 
 local Branding = require(Shared.config.Branding)
+local Effects = require("./controllers/Effects")
 local EntityRenderer = require("./controllers/EntityRenderer")
 local PredictionController = require("./controllers/PredictionController")
 local HudController = require("./controllers/HudController")
@@ -30,22 +31,13 @@ local function main()
 
 	PredictionController.setHooks({
 		onTracer = function(origin: Vector3, target: Vector3)
-			-- M1 placeholder. The effects layer lands in M7; drawing a beam
-			-- here keeps the prediction path observable in a playtest.
-			local distance = (target - origin).Magnitude
-			local beam = Instance.new("Part")
-			beam.Anchored = true
-			beam.CanCollide = false
-			beam.CanQuery = false
-			beam.CastShadow = false
-			beam.Material = Enum.Material.Neon
-			beam.Color = Color3.fromRGB(255, 220, 150)
-			beam.Size = Vector3.new(0.1, 0.1, distance)
-			beam.CFrame = CFrame.lookAt(origin, target) * CFrame.new(0, 0, -distance / 2)
-			beam.Parent = workspace
-			task.delay(0.05, function()
-				beam:Destroy()
-			end)
+			Effects.tracer(origin, target)
+			Effects.muzzleFlash(origin)
+		end,
+		-- `onHitmarker` and `onRemoveHitmarker` were declared in M1 and never
+		-- wired to anything, so a landed shot produced no feedback at all.
+		onHitmarker = function(_confirmed: boolean)
+			HudController.showHitmarker()
 		end,
 		-- The HUD is the only feedback that a weapon switch took effect.
 		onAmmoChanged = HudController.setAmmo,

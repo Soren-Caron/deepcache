@@ -21,8 +21,16 @@ local Quantize = require("./Quantize")
 
 export type Sample = {
 	pos: Types.Vec3,
+	--- Carried through unchanged. Kind never interpolates -- an entity does
+	--- not become another species between two frames -- but dropping it here
+	--- meant the renderer saw nil and drew every kind as the fallback box.
+	kind: Types.EntityKind,
 	yaw: number,
 	state: Types.EntityStateName,
+	--- Discrete like `state`, not lerped: health is authoritative and a
+	--- blended value would make a hit flash trigger a frame early or late.
+	--- Its absence is what made the renderer's damage feedback throw.
+	hpPct: number,
 	--- True when the sample is beyond the newest received frame, so the
 	--- renderer can fade or flag it if desired.
 	extrapolated: boolean,
@@ -152,8 +160,10 @@ end
 local function toSample(view: Types.EntityView, extrapolated: boolean): Sample
 	return {
 		pos = { x = view.pos.x, y = view.pos.y, z = view.pos.z },
+		kind = view.kind,
 		yaw = view.yaw,
 		state = view.state,
+		hpPct = view.hpPct,
 		extrapolated = extrapolated,
 	}
 end
@@ -213,8 +223,10 @@ function Interpolator.sample(self: Interpolator, entityId: number, renderTime: n
 				y = b.pos.y + (b.pos.y - a.pos.y) * scale,
 				z = b.pos.z + (b.pos.z - a.pos.z) * scale,
 			},
+			kind = b.kind,
 			yaw = b.yaw + Quantize.yawDelta(a.yaw, b.yaw) * scale,
 			state = b.state,
+			hpPct = b.hpPct,
 			extrapolated = true,
 		}
 	end
@@ -249,9 +261,11 @@ function Interpolator.sample(self: Interpolator, entityId: number, renderTime: n
 
 			return {
 				pos = Types.lerpVec3(a.pos, b.pos, alpha),
+				kind = b.kind,
 				yaw = a.yaw + Quantize.yawDelta(a.yaw, b.yaw) * alpha,
 				-- Discrete: snap to the nearer frame rather than blending.
 				state = if alpha < 0.5 then a.state else b.state,
+				hpPct = if alpha < 0.5 then a.hpPct else b.hpPct,
 				extrapolated = false,
 			}
 		end

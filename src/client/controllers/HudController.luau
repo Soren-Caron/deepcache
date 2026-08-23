@@ -75,11 +75,23 @@ local statusLabel: TextLabel
 local vitalsLabel: TextLabel
 local commsLabel: TextLabel
 
+local crosshair: Frame
+local hitmarker: Frame
+local hurtVignette: Frame
+
 --- Mirrored from PredictionController through a hook, not read from it: the
 --- HUD displaying what the prediction layer believes is the whole point, and
 --- two sources for one number is how a HUD ends up confidently lying.
 local currentWeapon = "Sidearm"
 local currentAmmo = 0
+
+local hitmarkerUntil = 0
+local hurtUntil = 0
+local lastHealth = -1
+
+local HITMARKER_SECONDS = 0.12
+local HURT_FLASH_SECONDS = 0.45
+local HURT_PEAK_TRANSPARENCY = 0.62
 local commsHideAt = 0
 
 local latest = {
@@ -205,6 +217,48 @@ local function render()
 	-- has no way to tell the switch worked.
 	vitalsLabel.Text = string.format("HP %3d   %s %d", hp, currentWeapon, currentAmmo)
 	vitalsLabel.TextColor3 = if hp <= 25 then ALERT else DIM
+
+	local now = os.clock()
+
+	-- Damage taken is detected from Humanoid health rather than a remote: the
+	-- engine already replicates it, and a dedicated packet per hit would be
+	-- bandwidth spent on something the client can see for free. Regeneration
+	-- ticks health *up*, so only a decrease counts.
+	if humanoid ~= nil then
+		local current = humanoid.Health
+		if lastHealth >= 0 and current < lastHealth - 0.01 then
+			hurtUntil = now + HURT_FLASH_SECONDS
+		end
+		lastHealth = current
+	end
+
+	if now < hurtUntil then
+		local t = (hurtUntil - now) / HURT_FLASH_SECONDS
+		hurtVignette.BackgroundTransparency = 1 - HURT_PEAK_TRANSPARENCY * t * t
+	else
+		hurtVignette.BackgroundTransparency = 1
+	end
+
+	if now < hitmarkerUntil then
+		hitmarker.Visible = true
+		-- Contracts as it fades, so rapid hits read as distinct marks rather
+		-- than one continuous smear.
+		local t = (hitmarkerUntil - now) / HITMARKER_SECONDS
+		local size = 16 + 10 * t
+		hitmarker.Size = UDim2.new(0, size, 0, size)
+		hitmarker.Position = UDim2.new(0.5, -size / 2, 0.5, -size / 2)
+	else
+		hitmarker.Visible = false
+	end
+
+	-- The crosshair dims while dead or extracted: nothing to aim at, and a
+	-- live-looking reticle over a corpse is a small lie.
+	crosshair.Visible = not latest.complete and latest.status ~= "dead"
+end
+
+--- Confirmed by the server, never predicted.
+function HudController.showHitmarker()
+	hitmarkerUntil = os.clock() + HITMARKER_SECONDS
 end
 
 --- Pushed by PredictionController when the player switches weapons.
@@ -256,6 +310,60 @@ function HudController.start()
 	weightBar.BackgroundColor3 = GOOD
 	weightBar.BorderSizePixel = 0
 	weightBar.Parent = barBack
+
+	-- Crosshair. A shooter without one asks the player to aim at the middle of
+	-- their monitor from memory, and the tracer arriving somewhere unexpected
+	-- reads as the weapon being broken rather than as the aim being off.
+	crosshair = Instance.new("Frame")
+	crosshair.Size = UDim2.new(0, 26, 0, 26)
+	crosshair.Position = UDim2.new(0.5, -13, 0.5, -13)
+	crosshair.BackgroundTransparency = 1
+	crosshair.Parent = root
+	for _, spec in
+		{
+			{ UDim2.new(0, 2, 0, 8), UDim2.new(0.5, -1, 0, 0) },
+			{ UDim2.new(0, 2, 0, 8), UDim2.new(0.5, -1, 1, -8) },
+			{ UDim2.new(0, 8, 0, 2), UDim2.new(0, 0, 0.5, -1) },
+			{ UDim2.new(0, 8, 0, 2), UDim2.new(1, -8, 0.5, -1) },
+		}
+	do
+		local tick_ = Instance.new("Frame")
+		tick_.Size = spec[1]
+		tick_.Position = spec[2]
+		tick_.BackgroundColor3 = Color3.fromRGB(235, 240, 245)
+		tick_.BackgroundTransparency = 0.25
+		tick_.BorderSizePixel = 0
+		tick_.Parent = crosshair
+	end
+
+	-- Hitmarker, drawn over the crosshair and hidden until a hit is confirmed
+	-- by the *server*. Predicting it would defeat the point: the whole value of
+	-- this mark is that it means the shot really landed.
+	hitmarker = Instance.new("Frame")
+	hitmarker.Size = UDim2.new(0, 22, 0, 22)
+	hitmarker.Position = UDim2.new(0.5, -11, 0.5, -11)
+	hitmarker.BackgroundTransparency = 1
+	hitmarker.Visible = false
+	hitmarker.Parent = root
+	for _, rotation in { 45, -45 } do
+		local stroke = Instance.new("Frame")
+		stroke.Size = UDim2.new(0, 20, 0, 2)
+		stroke.Position = UDim2.new(0.5, -10, 0.5, -1)
+		stroke.BackgroundColor3 = Color3.fromRGB(255, 240, 200)
+		stroke.BorderSizePixel = 0
+		stroke.Rotation = rotation
+		stroke.Parent = hitmarker
+	end
+
+	-- Full-screen red wash on taking damage. Health is a number in the corner;
+	-- this is what makes "I am being hurt right now" land without reading it.
+	hurtVignette = Instance.new("Frame")
+	hurtVignette.Size = UDim2.new(1, 0, 1, 0)
+	hurtVignette.BackgroundColor3 = Color3.fromRGB(150, 20, 20)
+	hurtVignette.BackgroundTransparency = 1
+	hurtVignette.BorderSizePixel = 0
+	hurtVignette.ZIndex = 5
+	hurtVignette.Parent = root
 
 	weightLabel = makeLabel(weightPanel, UDim2.new(1, 0, 0, 26), UDim2.new(0, 0, 0, 0), 20, Enum.TextXAlignment.Left)
 	statusLabel = makeLabel(root, UDim2.new(0, 520, 0, 22), UDim2.new(0, 24, 1, -30), 16, Enum.TextXAlignment.Left)
