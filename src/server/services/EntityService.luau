@@ -125,14 +125,17 @@ end
 
 --------------------------------------------------------------------------------
 
-local function nearestTarget(pos: Types.Vec3, targets: { Target }): Types.Vec3?
-	local best: Types.Vec3? = nil
+--- Returns the whole Target, not just its position: `EnemyAttack` needs to know
+--- *who* was chosen so a strike lands on the player the entity is facing rather
+--- than on whoever happens to be nearest when damage resolves.
+local function nearestTarget(pos: Types.Vec3, targets: { Target }): Target?
+	local best: Target? = nil
 	local bestDistance = math.huge
 	for _, target in targets do
 		local distance = Types.distance(pos, target.pos)
 		if distance < bestDistance then
 			bestDistance = distance
-			best = target.pos
+			best = target
 		end
 	end
 	return best
@@ -141,7 +144,7 @@ end
 --- The player carrying the most. Ties break by id so a replayed run picks the
 --- same victim; falling back to nearest keeps the Reclaimer useful before
 --- anyone has picked anything up.
-local function heaviestTarget(pos: Types.Vec3, targets: { Target }): Types.Vec3?
+local function heaviestTarget(pos: Types.Vec3, targets: { Target }): Target?
 	local best: Target? = nil
 	for _, target in targets do
 		local weight = target.weight or 0
@@ -152,7 +155,7 @@ local function heaviestTarget(pos: Types.Vec3, targets: { Target }): Types.Vec3?
 	if best == nil or (best.weight or 0) <= 0 then
 		return nearestTarget(pos, targets)
 	end
-	return best.pos
+	return best
 end
 
 --- Two points in the same room have no wall between them, so an entity may
@@ -261,15 +264,21 @@ function EntityService.step(tick: number, dt: number)
 		local behavior = config.behavior
 
 		-- HuntHeaviest goes for the biggest carry rather than the closest body.
-		local target = if behavior == "HuntHeaviest"
+		local chosen = if behavior == "HuntHeaviest"
 			then heaviestTarget(entity.pos, targets)
 			else nearestTarget(entity.pos, targets)
 
-		if target == nil then
+		if chosen == nil then
 			EntityState.transition(entity, "idle")
 			entity.vel = { x = 0, y = 0, z = 0 }
+			entity.targetId = nil
 			continue
 		end
+
+		-- Recorded so `EnemyAttack` strikes whoever this entity actually chose.
+		-- The field has existed on Types.Entity since M1 and was never assigned.
+		entity.targetId = chosen.id
+		local target = chosen.pos
 
 		local distance = Types.distance(entity.pos, target)
 

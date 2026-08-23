@@ -8,11 +8,13 @@
 	catch up asynchronously.
 
 	Phase order inside the tick is the other half of the contract:
-	spawn waves -> simulate -> record history -> resolve combat -> guard
-	movement -> advance the run -> replicate. Waves come first so an entity
-	spawned this tick is stepped and recorded into history on the same tick.
-	Combat must resolve against history recorded this tick, and replication must
-	see the results of combat, or a kill takes an extra tick to appear.
+	spawn waves -> simulate -> record history -> resolve combat -> resolve
+	enemy strikes -> guard movement -> advance the run -> replicate. Waves come
+	first so an entity spawned this tick is stepped and recorded into history on
+	the same tick. Combat must resolve against history recorded this tick, and
+	enemy strikes after it so an entity killed this tick cannot swing back from
+	beyond the grave. Replication must see the results of both, or a kill takes
+	an extra tick to appear.
 ]]
 
 local Players = game:GetService("Players")
@@ -33,6 +35,7 @@ local RunLifecycleService = require("./services/RunLifecycleService")
 local EntityService = require("./services/EntityService")
 local ReplicationService = require("./services/ReplicationService")
 local CombatService = require("./services/CombatService")
+local EnemyCombatService = require("./services/EnemyCombatService")
 local MovementGuardService = require("./services/MovementGuardService")
 local DirectorService = require("./services/DirectorService")
 local WaveService = require("./services/WaveService")
@@ -130,6 +133,11 @@ local function main()
 	-- hardcoded 0 since M4 because nothing tracked spent budget.
 	DirectorService.setBudgetSpentProvider(WaveService.aliveValue)
 
+	-- A player who already died or extracted is out of the run and must stop
+	-- being a valid target, or corpses and extracted players keep soaking hits.
+	-- Same predicate LootService uses, for the same reason.
+	EnemyCombatService.setStrikePredicate(RunLifecycleService.isActive)
+
 	-- Before `sim`, so an entity spawned this tick is stepped and recorded into
 	-- the rewind history on the same tick it appears. After replication it
 	-- would exist for a tick without being in any snapshot.
@@ -137,6 +145,9 @@ local function main()
 	TickService.addPhase("sim", EntityService.step)
 	TickService.addPhase("history", EntityService.recordHistory)
 	TickService.addPhase("combat", CombatService.step)
+	-- After `combat`, so an entity killed by a player this tick does not also
+	-- get to land a strike from beyond the grave.
+	TickService.addPhase("enemyCombat", EnemyCombatService.step)
 	TickService.addPhase("movement", MovementGuardService.step)
 	-- After combat and movement: extraction and death must see this tick's
 	-- outcomes, or a player killed on the tick they reach a pad extracts anyway.
@@ -931,6 +942,94 @@ local function main()
 	end)
 
 	Diagnostics.register("waveInfo", WaveService.describe)
+	Diagnostics.register("enemyCombatMetrics", EnemyCombatService.getMetrics)
+
+	-- Enemy damage acceptance: stand a player in a swarm and report what
+	-- actually lands. Reads HP directly rather than trusting the metrics
+	-- counter, so "damage was dealt" and "the player's health moved" are
+	-- checked independently -- the whole gap this closes was a counter that
+	-- would have read zero while everything else looked correct.
+	Diagnostics.register("enemyDamageProbe", function(kind: string?, count: number?, seconds: number?)
+		local player = Players:GetPlayers()[1]
+		local character = player and player.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+		if humanoid == nil or rootPart == nil or not rootPart:IsA("BasePart") then
+			return { error = "no character" }
+		end
+
+		local enemyKind = kind or "Skitter"
+		local config = (require(Shared.config.Enemies) :: any)[enemyKind]
+		if config == nil then
+			return { error = `unknown kind {enemyKind}` }
+		end
+
+		EnemyCombatService.reset()
+		humanoid.Health = humanoid.MaxHealth
+		local startHp = humanoid.Health
+		local startMetrics = EnemyCombatService.getMetrics()
+
+		-- Spawn a ring just inside attack range so contact is immediate and
+		-- the measurement is of damage, not of pathing.
+		local origin = rootPart.Position
+		local spawned: { number } = {}
+		local n = count or 3
+		local tick = TickService.getTick()
+		for i = 1, n do
+			local angle = (i / n) * math.pi * 2
+			local radius = math.max(2, config.atkRange - 1)
+			local entity = EntityService.spawn(enemyKind :: any, {
+				x = origin.X + math.cos(angle) * radius,
+				y = origin.Y,
+				z = origin.Z + math.sin(angle) * radius,
+			}, tick)
+			table.insert(spawned, entity.id)
+		end
+
+		local rows: { string } = {}
+		local duration = seconds or 5
+		local elapsed = 0
+		local lowestHp = startHp
+		while elapsed < duration do
+			task.wait(0.5)
+			elapsed += 0.5
+			local m = EnemyCombatService.getMetrics()
+			lowestHp = math.min(lowestHp, humanoid.Health)
+			table.insert(rows, string.format(
+				"t=%4.1fs  hp=%6.1f  strikes=%3d  dealt=%6.1f  cooldowns=%d",
+				elapsed, humanoid.Health, m.strikes, m.damageDealt, m.pendingCooldowns
+			))
+			if humanoid.Health <= 0 then
+				break
+			end
+		end
+
+		for _, id in spawned do
+			EntityService.remove(id)
+		end
+		local finalMetrics = EnemyCombatService.getMetrics()
+		humanoid.Health = humanoid.MaxHealth
+
+		return {
+			kind = enemyKind,
+			spawned = n,
+			expectedDamagePerHit = config.dmg,
+			expectedCooldown = config.atkCooldown,
+			hpBefore = startHp,
+			lowestHp = lowestHp,
+			-- Health observed on the Humanoid, against damage the resolver
+			-- believes it dealt. These disagree by design: Roblox's default
+			-- health regeneration ticks 1%/s of MaxHealth between strikes, so
+			-- damageDealt legitimately exceeds the HP drop over any window
+			-- longer than a second. Reporting both is what makes that visible
+			-- rather than looking like an accounting bug.
+			hpDropObserved = startHp - lowestHp,
+			damageResolverDealt = finalMetrics.damageDealt,
+			healthActuallyMoved = lowestHp < startHp,
+			metrics = finalMetrics,
+			timeline = rows,
+		}
+	end)
 
 	-- Waves are on a 12s interval and the first is held 20s, so watching one
 	-- arrive means sitting through a real minute per sample. This drives the
@@ -1005,7 +1104,7 @@ local function main()
 
 	print(
 		`[{Branding.gameName}] server up — tick {1 / 20}s, `
-			.. `phases: waves/sim/history/combat/movement/run/replication`
+			.. `phases: waves/sim/history/combat/enemyCombat/movement/run/replication`
 	)
 	print(
 		`[{Branding.gameName}] level seed {layout.seed} — {#layout.modules} modules `
