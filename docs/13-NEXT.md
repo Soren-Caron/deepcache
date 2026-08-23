@@ -53,11 +53,22 @@ from where. Enemies attack from up to 55 studs and the Sentry is static, so
 Requires the attacker position, which `EnemyCombatService` already has — it
 would need a remote, or to ride an existing one.
 
-**Entities are still boxes.** The gait and IK compute every frame, are LOD'd,
-and are inside budget — but nothing consumes the solved joint positions
-because there is no limb geometry. Per-kind rigs are M7-6/M7-8 asset work.
-Until then M7-3's "no popping at LOD transitions" stays unverifiable, and the
-client draws one silhouette per kind rather than a real body.
+~~**Entities are still boxes.**~~ **Done.** Per-kind rigs land in `22fd807`:
+`config/Rigs.luau` body plans driven by `client/EntityRig`, with the IK
+solutions finally moving real limbs. Leg count is the silhouette — Lancer 2,
+Sentry 3 (planted, never steps), Reclaimer 6.
+
+**Animation budget is now tight.** Driving 280 parts took animation+IK from
+**0.439 ms to 1.494 ms against a 2.0 ms budget** — 75% where it was 22%. It
+passes, but the M7-10 figure in `docs/metrics/m7.md` is now stale and the
+headroom is materially thinner. Re-profile before adding anything to the
+frame. Cheapest lever if it needs one: tighten the `full` LOD band from 40
+studs, since 25 of 32 entities currently qualify for full IK.
+
+**M7-3's "no popping at LOD transitions" is now testable** and has not been
+tested. There is real limb geometry to pop, and a `full`→`reduced` transition
+swaps IK for a straight-line pose, which is exactly where a visible snap
+would live.
 
 ---
 
