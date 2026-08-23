@@ -228,6 +228,10 @@ function PredictionController.start()
 	for name, weapon in WeaponsConfig :: any do
 		ammo[name] = weapon.magazine
 	end
+	-- Push the starting weapon once. Seeding `ammo` locally is not enough: the
+	-- HUD only ever learns a count from a hook, so without this it reads
+	-- "Sidearm 0" from boot until the player fires their first shot.
+	hooks.onWeaponChanged(currentWeapon, ammo[currentWeapon] or 0)
 
 	Remotes.event("FireResult").OnClientEvent:Connect(onFireResult)
 	Remotes.event("AmmoSync").OnClientEvent:Connect(onAmmoSync)

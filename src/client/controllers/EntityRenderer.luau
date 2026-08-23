@@ -16,7 +16,6 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 
-local EnemiesConfig = require(Shared.config.Enemies)
 local NetcodeConfig = require(Shared.config.Netcode)
 local Interpolator = require(Shared.core.net.Interpolator)
 local Snapshot = require(Shared.core.net.Snapshot)
@@ -25,6 +24,8 @@ local Remotes = require(Shared.net.Remotes)
 local Lod = require(Shared.core.anim.Lod)
 local StepPlanner = require(Shared.core.anim.StepPlanner)
 local TwoBoneIk = require(Shared.core.anim.TwoBoneIk)
+local RigsConfig = require(Shared.config.Rigs)
+local EntityRig = require("./EntityRig")
 
 local EntityRenderer = {}
 
@@ -36,16 +37,6 @@ local COLORS: { [string]: Color3 } = {
 	Warden = Color3.fromRGB(190, 120, 210),
 	Reclaimer = Color3.fromRGB(230, 60, 60),
 }
-
---- Silhouette per kind. Height and bulk read at a glance where a colour swatch
---- does not, especially at distance and in the Vault's heavy fog. Derived from
---- `hitboxRadius` so what you see is what the server will let you shoot.
-local KIND_SIZE: { [string]: Vector3 } = {}
-for kind, config in EnemiesConfig :: any do
-	local r = config.hitboxRadius
-	KIND_SIZE[kind] = Vector3.new(r * 1.25, r * 1.9, r * 1.25)
-end
-local DEFAULT_SIZE = Vector3.new(2, 3, 2)
 
 --- Material carries the fiction: the swarm is soft, the turret is metal, the
 --- Warden is armoured.
@@ -66,12 +57,6 @@ local DEATH_FADE_SECONDS = 0.9
 type Visual = { lastHp: number, flashUntil: number, deathAt: number }
 local visuals: { [number]: Visual } = {}
 
-local function applyKindLook(part: BasePart, kind: string)
-	part.Color = COLORS[kind] or COLORS.Skitter
-	part.Material = KIND_MATERIAL[kind] or Enum.Material.SmoothPlastic
-	part.Size = KIND_SIZE[kind] or DEFAULT_SIZE
-end
-
 local interp = Interpolator.new()
 local origin: Types.Vec3 = { x = 0, y = 0, z = 0 }
 
@@ -88,8 +73,7 @@ local origin: Types.Vec3 = { x = 0, y = 0, z = 0 }
 local baseline: { Types.EntityView } = {}
 
 local folder: Folder? = nil
-local active: { [number]: BasePart } = {}
-local pool: { BasePart } = {}
+local active: { [number]: EntityRig.Rig } = {}
 local connection: RBXScriptConnection? = nil
 
 local stats = {
@@ -105,18 +89,21 @@ local stats = {
 -- M7-3: procedural locomotion, LOD'd, with a hard per-frame raycast budget.
 --------------------------------------------------------------------------------
 
---- Rest offsets for a generic quadruped, in entity-local space. Real per-kind
---- rigs are M7-6/M7-8 asset work; the gait itself does not care how many legs
---- there are, so one profile drives every kind for now.
-local LEG_OFFSETS = {
-	Types.vec3(1.1, 0, 1.1),
-	Types.vec3(-1.1, 0, 1.1),
-	Types.vec3(1.1, 0, -1.1),
-	Types.vec3(-1.1, 0, -1.1),
-}
---- Diagonal pairs: the standard trot. Opposing legs never lift together.
-local LEG_GROUPS = { 1, 2, 2, 1 }
-local UPPER_LENGTH, LOWER_LENGTH = 1.4, 1.6
+--- Gait profile per kind, read from the rig body plan so the legs the planner
+--- steps are exactly the legs the renderer draws. Previously one generic
+--- quadruped drove every kind while the geometry was a single box, so the two
+--- could not disagree; now they can, and sharing one source is what stops them.
+local GAIT: { [string]: { offsets: { Types.Vec3 }, groups: { number } } } = {}
+for kind, spec in RigsConfig :: any do
+	local offsets: { Types.Vec3 } = {}
+	local groups: { number } = {}
+	for index, leg in spec.legs do
+		offsets[index] = Types.vec3(leg.offset.x, leg.offset.y, leg.offset.z)
+		groups[index] = leg.group
+	end
+	GAIT[kind] = { offsets = offsets, groups = groups }
+end
+
 local POLE = Types.vec3(0, 1, 0)
 
 type Locomotion = {
@@ -178,37 +165,17 @@ local function container(): Folder
 	return created
 end
 
-local function acquire(): BasePart
-	local recycled = table.remove(pool)
-	if recycled then
-		recycled.Parent = container()
-		return recycled
-	end
-
-	local part = Instance.new("Part")
-	part.Anchored = true
-	part.CanCollide = false
-	part.CanQuery = false
-	part.CanTouch = false
-	part.CastShadow = false
-	part.TopSurface = Enum.SurfaceType.Smooth
-	part.BottomSurface = Enum.SurfaceType.Smooth
-	part.Size = Vector3.new(2, 3, 2)
-	part.Parent = container()
-	return part
-end
-
 local function release(id: number)
-	local part = active[id]
-	if part == nil then
+	local rig = active[id]
+	if rig == nil then
 		return
 	end
 	active[id] = nil
-	-- Cleared with the part, not left behind: a stale entry would make a
+	-- Cleared with the rig, not left behind: a stale entry would make a
 	-- recycled id inherit the previous occupant's health and flash on spawn.
 	visuals[id] = nil
-	part.Parent = nil
-	table.insert(pool, part)
+	locomotion[id] = nil
+	EntityRig.release(rig)
 end
 
 function EntityRenderer.setOrigin(newOrigin: Types.Vec3)
@@ -322,17 +289,17 @@ local function render(dt: number)
 			stats.extrapolatedFrames += 1
 		end
 
-		local part = active[id]
-		if part == nil then
-			part = acquire()
-			part.Name = `Entity_{id}`
-			-- Kind now arrives in the snapshot's spare state bits, so a Warden
-			-- no longer renders as the same grey box as a Skitter.
-			applyKindLook(part, sample.kind)
-			active[id] = part
+		local rig = active[id]
+		if rig == nil then
+			-- Kind arrives in the snapshot's spare state bits, so a Warden gets
+			-- a Warden's body plan rather than a generic box.
+			rig = EntityRig.acquire(sample.kind, container())
+			rig.model.Name = `Entity_{id}`
+			active[id] = rig
 			visuals[id] = { lastHp = sample.hpPct, flashUntil = 0, deathAt = 0 }
+			local profileFor = GAIT[sample.kind] or GAIT.Skitter
 			locomotion[id] = {
-				gait = StepPlanner.new(LEG_OFFSETS, LEG_GROUPS),
+				gait = StepPlanner.new(profileFor.offsets, profileFor.groups),
 				lastPos = Types.vec3(sample.pos.x, sample.pos.y, sample.pos.z),
 				groundY = sample.pos.y,
 			}
@@ -351,7 +318,6 @@ local function render(dt: number)
 			look.lastHp = sample.hpPct
 		end
 
-		local baseSize = KIND_SIZE[sample.kind] or DEFAULT_SIZE
 		local scale, transparency = 1, 0
 
 		if sample.state == "death" then
@@ -370,25 +336,22 @@ local function render(dt: number)
 			transparency = 0.5
 		end
 
-		part.Size = baseSize * scale
-		part.Transparency = transparency
-
+		local colour, material
 		if look ~= nil and now < look.flashUntil then
-			part.Color = HIT_FLASH_COLOR
-			part.Material = Enum.Material.Neon
+			colour = HIT_FLASH_COLOR
+			material = Enum.Material.Neon
 		else
-			part.Color = COLORS[sample.kind] or COLORS.Skitter
-			part.Material = KIND_MATERIAL[sample.kind] or Enum.Material.SmoothPlastic
+			colour = COLORS[sample.kind] or COLORS.Skitter
+			material = KIND_MATERIAL[sample.kind] or Enum.Material.SmoothPlastic
+			-- Damage tint: darken toward the low-health colour as it bleeds
+			-- out, so a nearly-dead enemy is worth pushing rather than
+			-- guessing about.
+			if sample.state ~= "death" and sample.hpPct < 0.999 then
+				colour = colour:Lerp(WOUNDED_COLOR, (1 - sample.hpPct) * 0.6)
+			end
 		end
-
-		-- Damage tint: darken toward the low-health colour as it bleeds out, so
-		-- a nearly-dead enemy is worth pushing rather than guessing about.
-		if sample.state ~= "death" and look ~= nil and now >= look.flashUntil and sample.hpPct < 0.999 then
-			part.Color = part.Color:Lerp(WOUNDED_COLOR, (1 - sample.hpPct) * 0.6)
-		end
-
-		part.CFrame = CFrame.new(sample.pos.x, sample.pos.y, sample.pos.z)
-			* CFrame.Angles(0, sample.yaw, 0)
+		EntityRig.setLook(rig, colour, material, transparency)
+		EntityRig.setBody(rig, Vector3.new(sample.pos.x, sample.pos.y, sample.pos.z), sample.yaw, scale)
 
 		table.insert(candidates, {
 			id = id,
@@ -428,12 +391,54 @@ local function render(dt: number)
 		StepPlanner.step(loco.gait, bodyPos, velocity, dt, groundAtFactory(id, mayCast))
 
 		-- IK runs only at the full tier: at 40+ studs the joint position is
-		-- sub-pixel and solving it is pure cost.
-		if tier == "full" then
-			for _, leg in loco.gait.legs do
-				local foot = StepPlanner.footPosition(leg)
-				local hip = Types.addVec3(bodyPos, leg.restOffset)
-				TwoBoneIk.solve(hip, foot, UPPER_LENGTH, LOWER_LENGTH, POLE)
+		-- sub-pixel and solving it is pure cost. Beyond `reduced` the legs are
+		-- hidden outright, so there is nothing for a solution to drive.
+		local rig = active[id]
+		if rig == nil then
+			continue
+		end
+		local showLegs = tier == "full" or tier == "reduced"
+		EntityRig.setLegsVisible(rig, showLegs)
+
+		if showLegs then
+			local spec = rig.spec
+			-- Hips rotate with the body; the planner works in world space, so
+			-- the rest offset has to be rotated to match before it is a hip.
+			local yawCf = CFrame.Angles(0, sample.yaw, 0)
+			local bodyVec = Vector3.new(bodyPos.x, bodyPos.y, bodyPos.z)
+			for index, leg in loco.gait.legs do
+				local limb = rig.limbs[index]
+				if limb == nil then
+					continue
+				end
+				local footV = StepPlanner.footPosition(leg)
+				local foot = Vector3.new(footV.x, footV.y, footV.z)
+				local rotated = yawCf:VectorToWorldSpace(
+					Vector3.new(leg.restOffset.x, leg.restOffset.y, leg.restOffset.z)
+				)
+				-- Hip sits at the body, not at the resting foot height: the Y
+				-- of a rest offset is where the *foot* rests, and using it for
+				-- the hip would sink every joint into the floor.
+				local hip = bodyVec + Vector3.new(rotated.X, spec.bodyOffsetY * 0.4, rotated.Z)
+				local knee: Vector3
+				if tier == "full" then
+					local kneeV = TwoBoneIk.solve(
+						Types.vec3(hip.X, hip.Y, hip.Z),
+						Types.vec3(foot.X, foot.Y, foot.Z),
+						spec.upperLength,
+						spec.lowerLength,
+						POLE
+					)
+					knee = Vector3.new(kneeV.x, kneeV.y, kneeV.z)
+				else
+					-- `reduced`: straight-line pose, no law of cosines. At 40+
+					-- studs the bend is sub-pixel, but the limbs still have to
+					-- be *placed* -- an entity that never reached `full` would
+					-- otherwise keep the CFrame it was built with and stretch
+					-- its legs to the world origin.
+					knee = hip:Lerp(foot, 0.5)
+				end
+				EntityRig.placeLimb(limb, hip, knee, foot)
 			end
 		end
 	end
@@ -444,7 +449,6 @@ local function render(dt: number)
 	for id in active do
 		if not seen[id] then
 			release(id)
-			locomotion[id] = nil
 		end
 	end
 

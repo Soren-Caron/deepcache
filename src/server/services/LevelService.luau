@@ -44,14 +44,25 @@ local function toVector3(v: Types.Vec3): Vector3
 	return Vector3.new(v.x, v.y, v.z)
 end
 
---- Placeholder tint: deeper zones read darker. Replaced wholesale at M7-5.
-local function zoneColor(zone: string): Color3
-	local depth = Zones[zone].depth
-	local shade = 0.62 - (depth - 1) * 0.14
-	return Color3.new(shade, shade, shade + 0.03)
+local function rgb(entry: any): Color3
+	return Color3.fromRGB(entry.r, entry.g, entry.b)
 end
 
-local function makePart(name: string, size: Vector3, position: Vector3, parent: Instance, color: Color3): Part
+--- Surface palette for a zone. Floors, walls and trim differ per zone so the
+--- three bands of the run read apart on geometry alone, before the lighting
+--- stack is applied over the top.
+local function palette(zone: string): any
+	return (Zones :: any)[zone].palette
+end
+
+local function makePart(
+	name: string,
+	size: Vector3,
+	position: Vector3,
+	parent: Instance,
+	color: Color3,
+	material: Enum.Material?
+): Part
 	local part = Instance.new("Part")
 	part.Name = name
 	part.Size = size
@@ -60,7 +71,31 @@ local function makePart(name: string, size: Vector3, position: Vector3, parent: 
 	part.CanCollide = true
 	part.TopSurface = Enum.SurfaceType.Smooth
 	part.BottomSurface = Enum.SurfaceType.Smooth
-	part.Material = Enum.Material.Concrete
+	part.Material = material or Enum.Material.Concrete
+	part.Color = color
+	part.Parent = parent
+	return part
+end
+
+--- A thin emissive strip along the base of a wall.
+---
+--- Cheap in parts and disproportionately effective: the Vault's fog ends at 45
+--- studs and eats surface colour well before that, but a Neon strip still
+--- reads, so trim is what actually tells a player which zone they are standing
+--- in once visibility drops.
+local function makeTrim(name: string, size: Vector3, position: Vector3, parent: Instance, color: Color3): Part
+	local part = Instance.new("Part")
+	part.Name = name
+	part.Size = size
+	part.Position = position
+	part.Anchored = true
+	-- Decoration only: collision would let a player stand on the strip, and
+	-- query would put it in front of every wall raycast in the combat path.
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.CastShadow = false
+	part.Material = Enum.Material.Neon
 	part.Color = color
 	part.Parent = parent
 	return part
@@ -69,12 +104,16 @@ end
 --- One wall face. Splits around a doorway when the face carries a used
 --- connector, and adds the lintel above it so the gap is a doorway rather than
 --- a slot open to the ceiling.
+local TRIM_HEIGHT = 0.4
+
 local function buildWall(
 	parent: Instance,
 	face: string,
 	module_: Assemble.PlacedModule,
 	doorWidth: number?,
-	color: Color3
+	color: Color3,
+	wallMaterial: Enum.Material,
+	trimColor: Color3
 )
 	local thickness = GEOMETRY.wallThickness
 	local height = GEOMETRY.wallHeight
@@ -104,8 +143,16 @@ local function buildWall(
 		local position = if horizontal
 			then Vector3.new(x + offset, yCentre, z)
 			else Vector3.new(x, yCentre, z + offset)
-		makePart(`Wall_{face}_{name}`, size, position, parent, color)
+		makePart(`Wall_{face}_{name}`, size, position, parent, color, wallMaterial)
 	end
+
+	-- One continuous strip along the base of the face, under the doorway gap
+	-- too: it reads as a floor-level light channel rather than as trim that
+	-- stops and restarts at every jamb.
+	local trimSize = if horizontal
+		then Vector3.new(span, TRIM_HEIGHT, thickness * 0.55)
+		else Vector3.new(thickness * 0.55, TRIM_HEIGHT, span)
+	makeTrim(`Trim_{face}`, trimSize, Vector3.new(x, TRIM_HEIGHT / 2 + 0.05, z), parent, trimColor)
 
 	if doorWidth == nil then
 		segment("Solid", span, 0, height / 2, height)
@@ -234,7 +281,12 @@ function LevelService.build(seed: number): Assemble.Layout
 	spawnPoints = { Perimeter = {}, Processing = {}, Vault = {} }
 
 	for _, module_ in layout.modules do
-		local color = zoneColor(module_.zone)
+		local pal = palette(module_.zone)
+		local floorColor = rgb(pal.floor)
+		local wallColor = rgb(pal.wall)
+		local trimColor = rgb(pal.trim)
+		local floorMaterial = Enum.Material[pal.floorMaterial] :: Enum.Material
+		local wallMaterial = Enum.Material[pal.wallMaterial] :: Enum.Material
 		local model = Instance.new("Model")
 		model.Name = string.format("%03d_%s", module_.index, module_.id)
 		model:SetAttribute("moduleIndex", module_.index)
@@ -249,13 +301,14 @@ function LevelService.build(seed: number): Assemble.Layout
 			Vector3.new(module_.width, GEOMETRY.floorThickness, module_.depth),
 			Vector3.new(module_.at.x, -GEOMETRY.floorThickness / 2, module_.at.z),
 			model,
-			color
+			floorColor,
+			floorMaterial
 		)
 		model.PrimaryPart = floor
 
 		local widths = doorWidths(module_)
 		for _, face in { "N", "S", "E", "W" } do
-			buildWall(model, face, module_, widths[face], color)
+			buildWall(model, face, module_, widths[face], wallColor, wallMaterial, trimColor)
 		end
 
 		for _, point in spawnPointsIn(module_) do
