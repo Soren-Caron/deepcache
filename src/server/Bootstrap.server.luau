@@ -1081,6 +1081,120 @@ local function main()
 		return WaveService.describe()
 	end)
 
+	-- Line-of-sight acceptance. Must be a registered handler rather than a
+	-- command-bar script: `require`-ing EntityService from the bar returns a
+	-- fresh idle copy whose entities no tick phase ever steps, so they sit in
+	-- `spawn` forever and never attack -- which reads exactly like a working
+	-- line-of-sight check and is not one.
+	Diagnostics.register("losProbe", function(kind: string?, seconds: number?)
+		local player = Players:GetPlayers()[1]
+		local character = player and player.Character
+		local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		if rootPart == nil or humanoid == nil or not rootPart:IsA("BasePart") then
+			return { error = "no character" }
+		end
+		local enemyKind = kind or "Sentry"
+		local duration = seconds or 5
+
+		local level = Workspace:FindFirstChild("Level")
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Whitelist
+		params.FilterDescendantsInstances = if level then { level } else {}
+		local origin = rootPart.Position + Vector3.new(0, 2, 0)
+
+		--- Anchor the player for the duration. Without it the character drifts,
+		--- the distance being reported is not the distance damage was resolved
+		--- at, and a mobile enemy walks out from behind the wall the test is
+		--- supposed to be about.
+		local function measure(at: Vector3, label: string)
+			humanoid.Health = humanoid.MaxHealth
+			local wasAnchored = rootPart.Anchored
+			rootPart.Anchored = true
+
+			local before = EnemyCombatService.getMetrics()
+			local entity = EntityService.spawn(
+				enemyKind :: any,
+				{ x = at.X, y = rootPart.Position.Y, z = at.Z },
+				TickService.getTick()
+			)
+
+			-- Sample whether sight is genuinely obstructed rather than trusting
+			-- the placement: "0 strikes" only proves the line-of-sight check if
+			-- the line was actually blocked the whole time.
+			local blockedSamples, samples = 0, 0
+			local deadline = os.clock() + duration
+			while os.clock() < deadline do
+				local live = EntityService.get(entity.id)
+				if live ~= nil then
+					local from = Vector3.new(live.pos.x, live.pos.y, live.pos.z)
+					if Workspace:Raycast(from, rootPart.Position - from, params) ~= nil then
+						blockedSamples += 1
+					end
+					samples += 1
+				end
+				task.wait(0.1)
+			end
+
+			local after = EnemyCombatService.getMetrics()
+			local live = EntityService.get(entity.id)
+			local endDistance = if live ~= nil
+				then (Vector3.new(live.pos.x, live.pos.y, live.pos.z) - rootPart.Position).Magnitude
+				else -1
+			EntityService.remove(entity.id)
+			rootPart.Anchored = wasAnchored
+
+			local strikes = after.strikes - before.strikes
+			local damage = after.damageDealt - before.damageDealt
+			return string.format(
+				"%-16s endDist=%5.1f state=%-6s blocked=%3d%% strikes=%2d damage=%6.1f perHit=%s",
+				label, endDistance, live and live.state or "gone",
+				math.floor(100 * blockedSamples / math.max(samples, 1)),
+				strikes, damage,
+				if strikes > 0 then string.format("%.2f", damage / strikes) else "n/a"
+			)
+		end
+
+		local rows: { string } = {}
+
+		-- Eight directions, not four: from an open floor tile the axis-aligned
+		-- rays often all miss, and "no wall within range" is a skipped test
+		-- dressed up as a result.
+		local DIRECTIONS = {}
+		for i = 0, 7 do
+			local a = (i / 8) * math.pi * 2
+			table.insert(DIRECTIONS, Vector3.new(math.cos(a), 0, math.sin(a)))
+		end
+
+		-- Blocked: just past the first wall found within attack range.
+		local blocked: Vector3? = nil
+		for _, d in DIRECTIONS do
+			local r = Workspace:Raycast(origin, d * 60, params)
+			if r ~= nil and r.Distance > 6 and r.Distance < 40 then
+				blocked = r.Position + d * 5
+				break
+			end
+		end
+		rows[#rows + 1] = if blocked ~= nil
+			then measure(blocked, "behind a wall")
+			else "behind a wall    -- no wall within range from here"
+
+		-- Clear: a direction with nothing in the way.
+		local clear: Vector3? = nil
+		for _, d in DIRECTIONS do
+			if Workspace:Raycast(origin, d * 26, params) == nil then
+				clear = rootPart.Position + d * 24
+				break
+			end
+		end
+		rows[#rows + 1] = if clear ~= nil
+			then measure(clear, "clear sightline")
+			else "clear sightline  -- no clear 26-stud line from here"
+
+		humanoid.Health = humanoid.MaxHealth
+		return rows
+	end)
+
 	Diagnostics.register("movementMetrics", MovementGuardService.getMetrics)
 	Diagnostics.register("bandwidth", ReplicationService.sampleBandwidth)
 	Diagnostics.register("bench", TickBench.run)

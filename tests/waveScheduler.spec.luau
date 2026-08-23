@@ -271,11 +271,13 @@ t.describe("Waves config", function()
 		expect(Waves.FIRST_WAVE_DELAY_SECONDS > Waves.INTERVAL_SECONDS).toBeTruthy()
 	end)
 
-	t.it("caps population at or above the netcode interest cap", function()
-		-- Below the interest cap, the ceiling — not interest — would be what
-		-- limits what a player sees, which is not what either number means.
+	t.it("never allows more live entities than a client can be shown", function()
+		-- Was `>=`, which permitted the exact bug it should have caught:
+		-- replication sends at most INTEREST_MAX entities and the renderer
+		-- releases anything missing from a snapshot, so any entity above that
+		-- cap is alive and attacking while invisible to everyone.
 		local Netcode = require("../src/shared/config/Netcode")
-		expect(Waves.MAX_ALIVE >= Netcode.INTEREST_MAX).toBeTruthy()
+		expect(Waves.MAX_ALIVE <= Netcode.INTEREST_MAX).toBeTruthy()
 	end)
 
 	t.it("sets a minimum wave at least as large as the cheapest enemy", function()

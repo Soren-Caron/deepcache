@@ -56,6 +56,15 @@ local hooks = {
 	onHitmarker = function(_confirmed: boolean) end,
 	onRemoveHitmarker = function() end,
 	onAmmoChanged = function(_weaponId: string, _ammo: number) end,
+	onWeaponChanged = function(_weaponId: string, _ammo: number) end,
+}
+
+--- Number-key bindings, in the order docs/01 lists the weapon table.
+local SLOT_KEYS: { [Enum.KeyCode]: string } = {
+	[Enum.KeyCode.One] = "Sidearm",
+	[Enum.KeyCode.Two] = "Carbine",
+	[Enum.KeyCode.Three] = "Slug",
+	[Enum.KeyCode.Four] = "Arc",
 }
 
 function PredictionController.setHooks(newHooks: { [string]: any })
@@ -229,6 +238,18 @@ function PredictionController.start()
 		end
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
 			fire()
+			return
+		end
+
+		-- Weapon switching. All four weapons have worked server-side since M2-5
+		-- and `setWeapon` has existed since M1, but nothing was ever bound to
+		-- it, so a real session could only ever fire the Sidearm. With 88 dps
+		-- that made a Warden (700 HP, 15.7 dps) and a Reclaimer (550 HP, 26
+		-- dps) unwinnable solo -- they out-damage the time needed to kill them.
+		local slot = SLOT_KEYS[input.KeyCode]
+		if slot ~= nil then
+			PredictionController.setWeapon(slot)
+			hooks.onWeaponChanged(slot, ammo[slot] or 0)
 		end
 	end)
 end

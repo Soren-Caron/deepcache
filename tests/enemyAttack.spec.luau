@@ -139,6 +139,112 @@ t.describe("EnemyAttack.step — refusals", function()
 	end)
 end)
 
+t.describe("EnemyAttack.step — line of sight", function()
+	local function blind()
+		return function()
+			return false
+		end
+	end
+	local function clear()
+		return function()
+			return true
+		end
+	end
+
+	t.it("never strikes through an obstruction", function()
+		-- The bug this closes: player shots have raycast against level geometry
+		-- since M1, and enemy attacks checked distance only. A Sentry at 45
+		-- studs was shooting through walls from an adjacent room, so cover did
+		-- not exist and contact could not be broken.
+		local state = EnemyAttack.new()
+		local hits = 0
+		local now = 0
+		for _ = 1, 200 do
+			hits += #EnemyAttack.step(state, now, { attacker() }, { targetAt(2) }, STATS, blind())
+			now += 0.05
+		end
+		expect(hits).toEqual(0)
+	end)
+
+	t.it("does not bank a windup while blocked", function()
+		-- Otherwise an entity waits behind a wall accumulating its cooldown and
+		-- strikes the instant the player steps into view, with no windup.
+		local state = EnemyAttack.new()
+		local now = 0
+		for _ = 1, 100 do
+			EnemyAttack.step(state, now, { attacker() }, { targetAt(2) }, STATS, blind())
+			now += 0.05
+		end
+		-- First tick with sight is the windup, not a hit.
+		expect(#EnemyAttack.step(state, now, { attacker() }, { targetAt(2) }, STATS, clear())).toEqual(0)
+		expect(#EnemyAttack.step(state, now + 0.8, { attacker() }, { targetAt(2) }, STATS, clear())).toEqual(1)
+	end)
+
+	t.it("strikes normally when sight is clear", function()
+		local state = EnemyAttack.new()
+		EnemyAttack.step(state, 0, { attacker() }, { targetAt(2) }, STATS, clear())
+		expect(#EnemyAttack.step(state, 0.8, { attacker() }, { targetAt(2) }, STATS, clear())).toEqual(1)
+	end)
+
+	t.it("treats an absent predicate as fully visible", function()
+		-- Backwards compatible: omitting it is what the module did before.
+		local state = EnemyAttack.new()
+		EnemyAttack.step(state, 0, { attacker() }, { targetAt(2) }, STATS)
+		expect(#EnemyAttack.step(state, 0.8, { attacker() }, { targetAt(2) }, STATS)).toEqual(1)
+	end)
+
+	t.it("is asked about the right pair of points", function()
+		local seen: { { from: number, to: number } } = {}
+		local probe = function(from, to)
+			table.insert(seen, { from = from.x, to = to.x })
+			return true
+		end
+		local state = EnemyAttack.new()
+		EnemyAttack.step(state, 0, { attacker() }, { targetAt(3) }, STATS, probe)
+		expect(#seen).toEqual(1)
+		expect(seen[1].from).approx(0, 1e-9)
+		expect(seen[1].to).approx(3, 1e-9)
+	end)
+end)
+
+t.describe("EnemyAttack.step — damage falloff", function()
+	local RANGED: { [string]: EnemyAttack.Stats } = {
+		Sentry = { dmg = 100, atkRange = 40, atkCooldown = 1, falloffStart = 10, minMultiplier = 0.5 },
+	}
+
+	local function strikeAt(distance: number): number
+		local state = EnemyAttack.new()
+		local a: EnemyAttack.Attacker =
+			{ id = 1, kind = "Sentry", pos = { x = 0, y = 0, z = 0 }, state = "attack", targetId = 100 }
+		local target = { id = 100, pos = { x = distance, y = 0, z = 0 } }
+		EnemyAttack.step(state, 0, { a }, { target }, RANGED)
+		local strikes = EnemyAttack.step(state, 1, { a }, { target }, RANGED)
+		return if #strikes > 0 then strikes[1].damage else 0
+	end
+
+	t.it("deals full damage inside the falloff start", function()
+		expect(strikeAt(5)).approx(100, 1e-9)
+		expect(strikeAt(10)).approx(100, 1e-9)
+	end)
+
+	t.it("deals the floor at maximum range", function()
+		expect(strikeAt(40)).approx(50, 1e-9)
+	end)
+
+	t.it("interpolates linearly in between", function()
+		-- Halfway from 10 to 40 is 25, so halfway from 1.0 to 0.5 is 0.75.
+		expect(strikeAt(25)).approx(75, 1e-9)
+	end)
+
+	t.it("melee kinds with no falloff configured are unaffected", function()
+		local state = EnemyAttack.new()
+		EnemyAttack.step(state, 0, { attacker() }, { targetAt(3.9) }, STATS)
+		local strikes = EnemyAttack.step(state, 1, { attacker() }, { targetAt(3.9) }, STATS)
+		-- A Skitter biting at 3.9 studs is not weaker than at 1 stud.
+		expect(strikes[1].damage).approx(8, 1e-9)
+	end)
+end)
+
 t.describe("EnemyAttack.step — cooldown banking", function()
 	t.it("does not bank cooldowns while out of range", function()
 		-- The bug this exists to prevent: an entity kept out of range for ten
@@ -281,5 +387,62 @@ t.describe("EnemyAttack — against the real roster", function()
 		-- or 3, the config moved and the game became a one-shot.
 		local hits = math.ceil(100 / Enemies.Skitter.dmg)
 		expect(hits >= 8 and hits <= 20).toBeTruthy()
+	end)
+
+	-- docs/01 §Scaling -> Survivability records these targets and why.
+	local PLAYER_HP = 100
+	local SIDEARM_DPS = 22 * 4.0
+	local CARBINE_DPS = 17 * 9.0
+	--- How many melee attackers physically fit around one player. A 2.5-stud
+	--- player ringed by ~2-stud bodies seats about six; summing a per-type cap
+	--- of 24 assumes all of them touch you at once, which no geometry allows.
+	local MELEE_CONTACT = 6
+
+	t.it("every kind is beatable one-on-one with some reachable weapon", function()
+		for kind, config in Enemies do
+			local secondsToKillPlayer = PLAYER_HP / (config.dmg / config.atkCooldown)
+			local best = config.hp / CARBINE_DPS
+			expect(secondsToKillPlayer > best).toBeTruthy()
+		end
+	end)
+
+	t.it("non-elite kinds are beatable with the starting Sidearm", function()
+		-- Elites (budget >= 8) are squad content by design and are excluded.
+		-- Everything the baseline planner throws at a lone player is not.
+		for kind, config in Enemies do
+			if config.budget < 8 then
+				local secondsToKillPlayer = PLAYER_HP / (config.dmg / config.atkCooldown)
+				expect(secondsToKillPlayer > config.hp / SIDEARM_DPS).toBeTruthy()
+			end
+		end
+	end)
+
+	t.it("a worst-case engagement still leaves time to react", function()
+		-- The check that would have caught "impossible to beat". Modelled on
+		-- what can actually engage: melee kinds are limited by how many bodies
+		-- fit around a player, ranged kinds can all hold a sightline at once
+		-- but are subject to falloff at the distance they hold it from.
+		local MIN_SURVIVAL_SECONDS = 1.5
+		for kind, config in Enemies do
+			local dps = config.dmg / config.atkCooldown
+			local attackers, multiplier
+			if config.atkRange > 10 then
+				attackers = config.capPerWave
+				multiplier = config.minMultiplier or 1
+			else
+				attackers = math.min(config.capPerWave, MELEE_CONTACT)
+				multiplier = 1
+			end
+			expect(PLAYER_HP / (dps * attackers * multiplier) >= MIN_SURVIVAL_SECONDS).toBeTruthy()
+		end
+	end)
+
+	t.it("ranged kinds fall off with distance; melee kinds do not", function()
+		for _, config in Enemies do
+			if config.atkRange > 10 then
+				expect(config.falloffStart ~= nil).toBeTruthy()
+				expect(config.falloffStart < config.atkRange).toBeTruthy()
+			end
+		end
 	end)
 end)

@@ -22,13 +22,28 @@
 	at 40 entities absolutely will.
 ]]
 
+local DamageModel = require("./DamageModel")
 local Types = require("../Types")
 
 export type Stats = {
 	dmg: number,
 	atkRange: number,
 	atkCooldown: number,
+	--- Distance at which damage begins dropping off. Defaults to `atkRange`
+	--- (no falloff), which is right for melee: a Skitter biting you at 3.9
+	--- studs is not meaningfully weaker than at 1 stud. Ranged kinds set it,
+	--- because a turret suppressing from across a room should be a reason to
+	--- take cover rather than an instant execution.
+	falloffStart: number?,
+	--- Damage multiplier at `atkRange` and beyond. Defaults to 1.
+	minMultiplier: number?,
 }
+
+--- Whether `from` can actually see `to`. Supplied by the adapter, because the
+--- answer is an engine raycast against level geometry and this module may not
+--- touch the engine. Absent, everything is considered visible — which is what
+--- this module did unconditionally before, and why enemies shot through walls.
+export type Visibility = (from: Types.Vec3, to: Types.Vec3) -> boolean
 
 --- One entity, as the attack resolver sees it. Mirrors the fields of
 --- `Types.Entity` that matter and nothing else, so this stays testable without
@@ -97,7 +112,8 @@ function EnemyAttack.step(
 	now: number,
 	attackers: { Attacker },
 	targets: { Target },
-	stats: { [string]: Stats }
+	stats: { [string]: Stats },
+	canSee: Visibility?
 ): { Strike }
 	local strikes: { Strike } = {}
 
@@ -132,6 +148,13 @@ function EnemyAttack.step(
 			continue
 		end
 
+		-- Checked before the cooldown is armed, so an entity does not sit
+		-- behind a wall silently banking its windup and then strike the instant
+		-- the player steps into view.
+		if canSee ~= nil and not canSee(attacker.pos, target.pos) then
+			continue
+		end
+
 		local ready = state.readyAt[attacker.id]
 		if ready == nil then
 			-- First sighting: arm the cooldown rather than striking. See the
@@ -144,7 +167,16 @@ function EnemyAttack.step(
 			continue
 		end
 
-		local damage = math.max(0, if isFinite(config.dmg) then config.dmg else 0)
+		-- Same falloff curve player weapons use, for the same reason: distance
+		-- should buy you something. A ranged kind at the edge of its envelope
+		-- suppresses rather than executes.
+		local base = math.max(0, if isFinite(config.dmg) then config.dmg else 0)
+		local damage = base * DamageModel.falloff(
+			distance,
+			config.falloffStart or config.atkRange,
+			config.atkRange,
+			config.minMultiplier or 1
+		)
 		if damage > 0 then
 			table.insert(strikes, {
 				entityId = attacker.id,

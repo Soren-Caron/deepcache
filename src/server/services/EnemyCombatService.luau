@@ -32,7 +32,42 @@ local EnemyCombatService = {}
 --- Per-kind stats, flattened once. Core cannot read config.
 local STATS: { [string]: EnemyAttack.Stats } = {}
 for kind, config in EnemiesConfig :: any do
-	STATS[kind] = { dmg = config.dmg, atkRange = config.atkRange, atkCooldown = config.atkCooldown }
+	STATS[kind] = {
+		dmg = config.dmg,
+		atkRange = config.atkRange,
+		atkCooldown = config.atkCooldown,
+		falloffStart = config.falloffStart,
+		minMultiplier = config.minMultiplier,
+	}
+end
+
+--- Level geometry only, matching how `CombatService` validates player shots.
+--- Characters and entities are excluded: an enemy should be blocked by a wall,
+--- not by another enemy standing in front of it.
+local sightParams = RaycastParams.new()
+sightParams.FilterType = Enum.RaycastFilterType.Whitelist
+sightParams.IgnoreWater = true
+
+local function refreshSightFilter()
+	local level = workspace:FindFirstChild("Level")
+	sightParams.FilterDescendantsInstances = if level then { level } else {}
+end
+
+--- Whether an entity can actually see a player.
+---
+--- This is the asymmetry the whole difficulty problem came down to: player
+--- shots have raycast against level geometry since M1 (`CombatService` step 6,
+--- "wall"), and enemy attacks checked distance only. Sentries at 45 studs and
+--- Lancers at 55 were shooting through walls from adjacent rooms, so there was
+--- no such thing as cover and no way to break contact.
+local function canSee(from: Types.Vec3, to: Types.Vec3): boolean
+	local origin = Vector3.new(from.x, from.y, from.z)
+	local finish = Vector3.new(to.x, to.y, to.z)
+	local direction = finish - origin
+	if direction.Magnitude < 1e-3 then
+		return true
+	end
+	return workspace:Raycast(origin, direction, sightParams) == nil
 end
 
 local state = EnemyAttack.new()
@@ -94,7 +129,15 @@ end
 
 function EnemyCombatService.step(_tick: number, _dt: number)
 	local targets, humanoids = livingTargets()
-	local strikes = EnemyAttack.step(state, os.clock(), attackers(), targets, STATS)
+	if #targets == 0 then
+		return
+	end
+
+	-- The level is rebuilt on run start and by the buildLevel diagnostic, so
+	-- the whitelist cannot be captured once at require time.
+	refreshSightFilter()
+
+	local strikes = EnemyAttack.step(state, os.clock(), attackers(), targets, STATS, canSee)
 
 	for _, strike in strikes do
 		local humanoid = humanoids[strike.targetId]

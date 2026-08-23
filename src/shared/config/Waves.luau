@@ -17,11 +17,16 @@ return {
 	--- has their bearings reads as unfair rather than tense.
 	FIRST_WAVE_DELAY_SECONDS = 20,
 
-	--- Hard ceiling on live entities, independent of budget. Two reasons, both
-	--- measured: docs/08's frame budgets were profiled at 40 entities, and the
-	--- netcode's interest cap is 32 — past that the extra entities cost tick
-	--- time to simulate and are never replicated to anyone.
-	MAX_ALIVE = 40,
+	--- Hard ceiling on live entities, independent of budget.
+	---
+	--- **Must not exceed `Netcode.INTEREST_MAX`.** Replication sends a client at
+	--- most that many entities, and `EntityRenderer` releases anything absent
+	--- from a snapshot — so an entity over the cap is alive, pathing and
+	--- attacking while never being drawn for anyone. At the previous value of
+	--- 40 against an interest cap of 32, up to eight attackers were invisible,
+	--- reported from a play session as taking damage from an enemy that was not
+	--- there. A test asserts the two stay equal.
+	MAX_ALIVE = 32,
 
 	--- Don't spawn for less than a Lancer's worth. Without a floor, a single
 	--- kill re-opens the budget and the next tick trickles one Skitter back in,

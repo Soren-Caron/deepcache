@@ -47,6 +47,9 @@ local function main()
 				beam:Destroy()
 			end)
 		end,
+		-- The HUD is the only feedback that a weapon switch took effect.
+		onAmmoChanged = HudController.setAmmo,
+		onWeaponChanged = HudController.setWeapon,
 	})
 
 	PredictionController.start()

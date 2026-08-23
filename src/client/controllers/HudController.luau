@@ -74,6 +74,12 @@ local padLabel: TextLabel
 local statusLabel: TextLabel
 local vitalsLabel: TextLabel
 local commsLabel: TextLabel
+
+--- Mirrored from PredictionController through a hook, not read from it: the
+--- HUD displaying what the prediction layer believes is the whole point, and
+--- two sources for one number is how a HUD ends up confidently lying.
+local currentWeapon = "Sidearm"
+local currentAmmo = 0
 local commsHideAt = 0
 
 local latest = {
@@ -194,8 +200,26 @@ local function render()
 	local character = player.Character
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 	local hp = if humanoid then math.max(0, math.floor(humanoid.Health)) else 0
-	vitalsLabel.Text = string.format("HP %3d", hp)
+	-- Weapon rides on the vitals line rather than getting its own: switching is
+	-- new (number keys 1-4) and a player who cannot see which weapon is live
+	-- has no way to tell the switch worked.
+	vitalsLabel.Text = string.format("HP %3d   %s %d", hp, currentWeapon, currentAmmo)
 	vitalsLabel.TextColor3 = if hp <= 25 then ALERT else DIM
+end
+
+--- Pushed by PredictionController when the player switches weapons.
+function HudController.setWeapon(weaponId: string, ammo: number)
+	currentWeapon = weaponId
+	currentAmmo = ammo
+end
+
+--- Pushed on every ammo change, including server `AmmoSync` for weapons the
+--- player is not currently holding — so it must not change which weapon is
+--- displayed, only the count for the one that is.
+function HudController.setAmmo(weaponId: string, ammo: number)
+	if weaponId == currentWeapon then
+		currentAmmo = ammo
+	end
 end
 
 function HudController.start()

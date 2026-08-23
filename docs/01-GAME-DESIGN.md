@@ -151,6 +151,22 @@ directorMul       ∈ [0.6, 1.6]                             -- OVERSEER's only 
 
 `BASE = 12`. Budget is spent on enemy `budget` costs by a weighted picker respecting per-type caps and zone availability. Everything except `directorMul` is deterministic and testable in pure Luau.
 
+### Survivability
+
+Left unstated until a play session came back as "impossible to beat", which it measurably was. These are the targets the balance tests now enforce.
+
+| Rule | Target | Why |
+|---|---|---|
+| Worst-case engagement | player survives **≥ 1.5 s** at full health | Enough to identify the threat and start moving. Below this, death precedes reaction. |
+| One-on-one, non-elite | winnable with the **starting Sidearm** | Anything the baseline planner sends at a lone player must be beatable with what that player actually has. |
+| One-on-one, elite (`budget ≥ 8`) | winnable with **some reachable weapon** | Wardens and Reclaimers are squad content; they may beat a Sidearm, but not every weapon. |
+
+"Worst case" is modelled on what can physically engage, not on a naive sum of per-type caps: melee kinds are limited to the **six** bodies that fit around one player, while ranged kinds may all hold a sightline at once but are subject to falloff at the distance they hold it from. Summing `capPerWave` assumes 24 Skitters touch you simultaneously, which no geometry allows.
+
+**Enemy attacks require line of sight**, checked by the same raycast against level geometry that validates player shots. Without it there is no cover, no way to break contact, and a Sentry's 45-stud range means an entire wing of the facility is under fire at once.
+
+**Ranged kinds fall off with distance; melee kinds do not.** A Skitter biting at 3.9 studs is not weaker than at 1 stud. A Sentry at the edge of its envelope should suppress rather than execute.
+
 ### Cadence
 
 The formula above is a **standing pressure level, not a per-wave allowance** — this was left unstated until the spawner was actually wired, and it is the load-bearing half. Read as a per-wave grant, `timeRamp` would mean the *rate* of spawning compounds, which buries the level in enemies by minute eight. Read as a target population, it means "this much enemy should be alive right now", which is what the curve is shaped like.
