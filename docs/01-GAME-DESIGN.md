@@ -151,6 +151,23 @@ directorMul       ∈ [0.6, 1.6]                             -- OVERSEER's only 
 
 `BASE = 12`. Budget is spent on enemy `budget` costs by a weighted picker respecting per-type caps and zone availability. Everything except `directorMul` is deterministic and testable in pure Luau.
 
+### Cadence
+
+The formula above is a **standing pressure level, not a per-wave allowance** — this was left unstated until the spawner was actually wired, and it is the load-bearing half. Read as a per-wave grant, `timeRamp` would mean the *rate* of spawning compounds, which buries the level in enemies by minute eight. Read as a target population, it means "this much enemy should be alive right now", which is what the curve is shaped like.
+
+So a wave **tops the live population back up toward the target** rather than adding to it. The outstanding budget is `target − aliveValue`, where `aliveValue` is the summed cost of everything currently breathing. Corpses do not count: a body on the floor is not pressure.
+
+| Tunable | Value | Why |
+|---|---:|---|
+| `INTERVAL_SECONDS` | 12 | Minimum spacing between waves |
+| `FIRST_WAVE_DELAY_SECONDS` | 20 | Longer than the interval — dropping into a fight before the player has their bearings reads as unfair rather than tense |
+| `MAX_ALIVE` | 40 | Hard population ceiling, independent of budget. Matches docs/08's profiled frame budgets and sits above the netcode's 32-entity interest cap |
+| `MIN_WAVE_BUDGET` | 3 | Without a floor, one kill re-opens the budget and the next wave trickles a single Skitter in, which reads as popping rather than as a wave |
+
+**`INTERVAL_SECONDS` is a minimum, not a guarantee.** A wave fires only if the outstanding budget clears `MIN_WAVE_BUDGET` when the interval expires; otherwise it re-arms and re-checks a full interval later. Measured in-engine: with the first wave at 20.06 s, the second landed at 44.03 s rather than 32 s, because outstanding pressure did not clear the floor until the time ramp had grown the target. Pacing is driven by what is still alive, not by the clock alone.
+
+The **Reclaimer is spawned outside this budget**, and only when the director's `spawnPattern` is `hunt_heaviest` and none is already alive. It is `directorOnly`, so the weighted picker never selects it — this is the sole path that produces one, which is what makes the director's decision legible to players as the design intends. The consequence is that a Reclaimer overshoots the standing target by its cost of 8 and suppresses the next wave or two; that is self-correcting and intended, since a Reclaimer *is* the pressure.
+
 ## Economy surface (design view; mechanics in [07-ECONOMY](07-ECONOMY.md))
 
 - **Credits** — soft currency. Faucets: extraction payout, objective bonus, first-extract-of-day. Sinks: gear repair, ammo, insurance, market fee, cosmetics.

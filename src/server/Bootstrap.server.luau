@@ -8,7 +8,9 @@
 	catch up asynchronously.
 
 	Phase order inside the tick is the other half of the contract:
-	simulate -> record history -> resolve combat -> guard movement -> replicate.
+	spawn waves -> simulate -> record history -> resolve combat -> guard
+	movement -> advance the run -> replicate. Waves come first so an entity
+	spawned this tick is stepped and recorded into history on the same tick.
 	Combat must resolve against history recorded this tick, and replication must
 	see the results of combat, or a kill takes an extra tick to appear.
 ]]
@@ -19,6 +21,7 @@ local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 local Branding = require(Shared.config.Branding)
 local Rooms = require(Shared.config.Rooms)
 local Types = require(Shared.core.Types)
+local Run = require(Shared.core.sim.Run)
 local Remotes = require(Shared.net.Remotes)
 local Wire = require(Shared.net.Wire)
 
@@ -32,6 +35,7 @@ local ReplicationService = require("./services/ReplicationService")
 local CombatService = require("./services/CombatService")
 local MovementGuardService = require("./services/MovementGuardService")
 local DirectorService = require("./services/DirectorService")
+local WaveService = require("./services/WaveService")
 local QueueService = require("./services/QueueService")
 local EconomyService = require("./services/EconomyService")
 local MarketService = require("./services/MarketService")
@@ -105,6 +109,31 @@ local function main()
 
 	EntityService.setTargetProvider(playerTargets)
 
+	-- M2-8's adapter half. The budget planner has existed since M2 but nothing
+	-- called it, so a real session contained no enemies at all.
+	WaveService.setRunProvider(function(): WaveService.RunView
+		local run = RunLifecycleService.getState()
+		if run == nil then
+			return { active = false, elapsedSeconds = 0, headcount = 0, seed = 0 }
+		end
+		return {
+			active = not run.complete and Run.activeCount(run) > 0,
+			elapsedSeconds = run.elapsedSeconds,
+			-- Live count, not startingHeadcount: budget should fall as a squad
+			-- dies or extracts, or the last player alive inherits pressure
+			-- scaled for a full team.
+			headcount = Run.activeCount(run),
+			seed = run.seed,
+		}
+	end)
+	-- Closes the loop the other way: the director's pressure input has been a
+	-- hardcoded 0 since M4 because nothing tracked spent budget.
+	DirectorService.setBudgetSpentProvider(WaveService.aliveValue)
+
+	-- Before `sim`, so an entity spawned this tick is stepped and recorded into
+	-- the rewind history on the same tick it appears. After replication it
+	-- would exist for a tick without being in any snapshot.
+	TickService.addPhase("waves", WaveService.step)
 	TickService.addPhase("sim", EntityService.step)
 	TickService.addPhase("history", EntityService.recordHistory)
 	TickService.addPhase("combat", CombatService.step)
@@ -901,6 +930,58 @@ local function main()
 		return rows
 	end)
 
+	Diagnostics.register("waveInfo", WaveService.describe)
+
+	-- Waves are on a 12s interval and the first is held 20s, so watching one
+	-- arrive means sitting through a real minute per sample. This drives the
+	-- live service through several intervals at once and reports what each
+	-- decision was -- including the refusals, which is what distinguishes
+	-- "withheld deliberately" from "silently broken".
+	Diagnostics.register("waveProbe", function(seconds: number?, step: number?)
+		local total = seconds or 90
+		local chunk = step or 1
+		local rows: { string } = {}
+		local before = WaveService.describe()
+		table.insert(rows, string.format(
+			"start: alive=%d aliveValue=%.0f zone=%s",
+			before.aliveCount, before.aliveValue, tostring(before.lastZone)
+		))
+
+		local elapsed = 0
+		local lastWaves = before.waves
+		while elapsed < total do
+			-- Step the scheduler directly with a synthetic dt. The tick phase
+			-- advances by real dt, and 90 real seconds is not a smoke test.
+			WaveService.step(TickService.getTick(), chunk)
+			elapsed += chunk
+			local now = WaveService.describe()
+			if now.waves > lastWaves then
+				table.insert(rows, string.format(
+					"t=%3ds  WAVE  target=%.0f aliveValue=%.0f -> alive=%d  zone=%s",
+					elapsed, now.targetBudget, now.aliveValue, now.aliveCount, tostring(now.lastZone)
+				))
+				lastWaves = now.waves
+			end
+			task.wait()
+		end
+
+		local after = WaveService.describe()
+		table.insert(rows, string.format(
+			"end: waves=%d spawned=%d reclaimers=%d alive=%d/%d lastReason=%s",
+			after.waves, after.spawned, after.reclaimersSummoned,
+			after.aliveCount, after.maxAlive, tostring(after.lastReason)
+		))
+		return { rows = rows, info = after, census = after.census }
+	end)
+
+	Diagnostics.register("waveReset", function()
+		WaveService.reset()
+		for _, view in EntityService.views() do
+			EntityService.remove(view.id)
+		end
+		return WaveService.describe()
+	end)
+
 	Diagnostics.register("movementMetrics", MovementGuardService.getMetrics)
 	Diagnostics.register("bandwidth", ReplicationService.sampleBandwidth)
 	Diagnostics.register("bench", TickBench.run)
@@ -922,7 +1003,10 @@ local function main()
 
 	TickService.start()
 
-	print(`[{Branding.gameName}] server up — tick {1 / 20}s, phases: sim/history/combat/movement/run/replication`)
+	print(
+		`[{Branding.gameName}] server up — tick {1 / 20}s, `
+			.. `phases: waves/sim/history/combat/movement/run/replication`
+	)
 	print(
 		`[{Branding.gameName}] level seed {layout.seed} — {#layout.modules} modules `
 			.. `({layout.spineCount} spine + {layout.branchCount} branches), {layout.totalArea} studs^2`

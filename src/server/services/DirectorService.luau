@@ -80,6 +80,17 @@ local pendingProposal: unknown = nil
 local consecutiveFailures = 0
 local breakerOpenUntil = 0
 
+--- Live enemy budget standing on the floor, supplied by WaveService. Injected
+--- rather than required: WaveService already requires this module to read
+--- `spawnMultiplier`, so a direct require would close a cycle. Absent a
+--- provider this reports 0, which is what it reported unconditionally before
+--- the wave spawner existed.
+local budgetSpentProvider: (() -> number)? = nil
+
+function DirectorService.setBudgetSpentProvider(provider: () -> number)
+	budgetSpentProvider = provider
+end
+
 local history: { string } = {}
 --- The filtered, display-ready bark. Never the raw `currentDecision.bark`
 --- directly -- that has been sanitised of control characters by Clamp, but
@@ -275,7 +286,12 @@ function DirectorService.tick()
 
 	local input: Fsm.FsmInput = {
 		elapsedSeconds = elapsed,
-		pressure = { aliveEnemies = EntityService.count(), budgetSpent = 0, recentPlayerDamage = 0, recentEnemyDeaths = 0 },
+		pressure = {
+			aliveEnemies = EntityService.count(),
+			budgetSpent = if budgetSpentProvider ~= nil then budgetSpentProvider() else 0,
+			recentPlayerDamage = 0,
+			recentEnemyDeaths = 0,
+		},
 		squadHpFraction = squadHpFraction(),
 		secondsSinceLastFight = sinceFight,
 	}
