@@ -41,6 +41,12 @@ export type Leg = {
 export type GaitState = {
 	legs: { Leg },
 	bodyHeight: number,
+	--- How far a foot may be pushed from its rest position by the velocity
+	--- lead. A leg can only reach so far: past that the IK clamps and the limb
+	--- extends straight out, which is what made fast kinds look like spiders
+	--- rather than walkers. Infinite when the caller does not supply one, so a
+	--- gait with no geometry behind it behaves as it did before.
+	maxFootOffset: number,
 	--- Which group started the most recent step. The next step prefers a
 	--- different group; see `step` for why that is load-bearing rather than
 	--- cosmetic.
@@ -62,7 +68,7 @@ local function isPlanted(leg: Leg): boolean
 	return leg.stepPhase <= 0
 end
 
-function StepPlanner.new(restOffsets: { Types.Vec3 }, groups: { number }): GaitState
+function StepPlanner.new(restOffsets: { Types.Vec3 }, groups: { number }, maxFootOffset: number?): GaitState
 	local legs: { Leg } = {}
 	for index, offset in restOffsets do
 		local position = Types.vec3(offset.x, offset.y, offset.z)
@@ -78,17 +84,51 @@ function StepPlanner.new(restOffsets: { Types.Vec3 }, groups: { number }): GaitS
 			group = groups[index] or 1,
 		}
 	end
-	local seed: GaitState = { legs = legs, bodyHeight = 0, lastSteppedGroup = 0 }
+	local reach = maxFootOffset or math.huge
+	if reach ~= reach or reach <= 0 then
+		reach = math.huge
+	end
+	local seed: GaitState =
+		{ legs = legs, bodyHeight = 0, lastSteppedGroup = 0, maxFootOffset = reach }
 	seed.bodyHeight = StepPlanner.bodyHeight(seed)
 	return seed
 end
 
 --- Where this leg would like its foot, in world space, before grounding.
+---
+--- The velocity lead is deliberately *not* clamped here. Clamping it was tried
+--- and measured worse: the lead is what buys a leg time, because group
+--- alternation means each group only steps about every 0.56 s, and a Skitter
+--- covers 12 studs in that time. Shortening the lead left feet 8.7 studs
+--- behind their rest position instead of 2.9. The over-extension is bounded
+--- where it actually matters -- on the resolved foot, in `clampToReach`.
 local function desiredFoot(leg: Leg, bodyPos: Types.Vec3, velocity: Types.Vec3): Types.Vec3
 	return Types.addVec3(
 		Types.addVec3(bodyPos, leg.restOffset),
 		Types.scaleVec3(velocity, StepPlanner.STEP_LEAD)
 	)
+end
+
+--- Pull a foot back inside the leg's reach of where it should be standing.
+---
+--- This is what stops a limb pointing straight out. `TwoBoneIk` clamps an
+--- out-of-range target and extends the leg toward it, which is correct and
+--- documented -- but a foot the body has outrun stays out of range every
+--- frame, so the limb is permanently straight and the entity reads as a
+--- spider rather than a walker. Dragging the foot is the honest fix: a real
+--- leg that cannot reach simply does not stay behind.
+local function clampToReach(state: GaitState, leg: Leg, bodyPos: Types.Vec3)
+	if state.maxFootOffset == math.huge then
+		return
+	end
+	local rest = Types.addVec3(bodyPos, leg.restOffset)
+	local offset = Types.subVec3(leg.current, rest)
+	local distance = Types.magnitude(offset)
+	if distance <= state.maxFootOffset or distance < 1e-6 then
+		return
+	end
+	local pulled = Types.addVec3(rest, Types.scaleVec3(Types.normalize(offset), state.maxFootOffset))
+	leg.current = pulled
 end
 
 --- Is any leg outside `group` currently in flight?
@@ -177,6 +217,15 @@ function StepPlanner.step(
 				end
 			end
 			state.lastSteppedGroup = serveGroup
+		end
+	end
+
+	-- After stepping, not before: a foot that just landed is in range by
+	-- construction, and it is the planted feet the body has walked away from
+	-- that need pulling in.
+	for _, leg in state.legs do
+		if isPlanted(leg) then
+			clampToReach(state, leg, bodyPos)
 		end
 	end
 

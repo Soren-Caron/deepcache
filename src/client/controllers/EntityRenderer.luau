@@ -93,18 +93,37 @@ local stats = {
 --- steps are exactly the legs the renderer draws. Previously one generic
 --- quadruped drove every kind while the geometry was a single box, so the two
 --- could not disagree; now they can, and sharing one source is what stops them.
-local GAIT: { [string]: { offsets: { Types.Vec3 }, groups: { number } } } = {}
+local GAIT: { [string]: { offsets: { Types.Vec3 }, groups: { number }, reach: number } } = {}
 for kind, spec in RigsConfig :: any do
 	local offsets: { Types.Vec3 } = {}
 	local groups: { number } = {}
+	local drop = 0
 	for index, leg in spec.legs do
 		offsets[index] = Types.vec3(leg.offset.x, leg.offset.y, leg.offset.z)
 		groups[index] = leg.group
+		drop = math.max(drop, math.abs(leg.offset.y))
 	end
-	GAIT[kind] = { offsets = offsets, groups = groups }
+
+	-- How far a foot may sit from its rest position before the leg cannot
+	-- reach it. The leg spans `upper + lower`; most of that is spent on the
+	-- vertical drop from hip to floor, and what is left is the horizontal
+	-- budget. Pythagoras rather than a guessed constant, so retuning a body
+	-- plan cannot silently leave the gait asking for the impossible.
+	local span = spec.upperLength + spec.lowerLength
+	local vertical = drop + spec.bodyOffsetY * 0.4
+	local horizontal = if span > vertical then math.sqrt(span * span - vertical * vertical) else 0.2
+	GAIT[kind] = { offsets = offsets, groups = groups, reach = math.max(horizontal, 0.2) }
 end
 
-local POLE = Types.vec3(0, 1, 0)
+--- The pole decides which way a knee bends, and it must be *perpendicular* to
+--- the hip-to-foot axis. A standing leg is close to vertical, so the obvious
+--- (0,1,0) is near-parallel to it: its perpendicular component collapses,
+--- TwoBoneIk falls back to `anyPerpendicular`, and the chosen direction then
+--- swings between cardinal axes on tiny numerical differences. Every leg bends
+--- somewhere different and the result reads as an insect rather than a
+--- machine. A horizontal pole along the body's forward axis gives a stable,
+--- consistent forward-bending knee.
+local POLE_LOCAL = Vector3.new(0, 0, 1)
 
 type Locomotion = {
 	gait: StepPlanner.GaitState,
@@ -299,7 +318,7 @@ local function render(dt: number)
 			visuals[id] = { lastHp = sample.hpPct, flashUntil = 0, deathAt = 0 }
 			local profileFor = GAIT[sample.kind] or GAIT.Skitter
 			locomotion[id] = {
-				gait = StepPlanner.new(profileFor.offsets, profileFor.groups),
+				gait = StepPlanner.new(profileFor.offsets, profileFor.groups, profileFor.reach),
 				lastPos = Types.vec3(sample.pos.x, sample.pos.y, sample.pos.z),
 				groundY = sample.pos.y,
 			}
@@ -422,12 +441,13 @@ local function render(dt: number)
 				local hip = bodyVec + Vector3.new(rotated.X, spec.bodyOffsetY * 0.4, rotated.Z)
 				local knee: Vector3
 				if tier == "full" then
+					local pole = yawCf:VectorToWorldSpace(POLE_LOCAL)
 					local kneeV = TwoBoneIk.solve(
 						Types.vec3(hip.X, hip.Y, hip.Z),
 						Types.vec3(foot.X, foot.Y, foot.Z),
 						spec.upperLength,
 						spec.lowerLength,
-						POLE
+						Types.vec3(pole.X, pole.Y, pole.Z)
 					)
 					knee = Vector3.new(kneeV.x, kneeV.y, kneeV.z)
 				else
