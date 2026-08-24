@@ -53,7 +53,15 @@ from where. Enemies attack from up to 55 studs and the Sentry is static, so
 Requires the attacker position, which `EnemyCombatService` already has — it
 would need a remote, or to ride an existing one.
 
-~~**Entities are still boxes.**~~ **Done.** Per-kind rigs land in `22fd807`:
+**Enemies should be humanoid, not boxes with legs.** Planned in
+[docs/14-HUMANOID-RIGS.md](14-HUMANOID-RIGS.md) — read that before touching
+the rig. The current legged rig measures **0.990 limb straightness** (1.0 is a
+rigid stick): a Skitter spends 67% of its leg span on the hip-to-foot drop,
+leaving nothing to bend with. That is structural, not cosmetic, and two rounds
+of proportion tuning did not fix it. The humanoid plan carries the constraint
+forward as a rule: limb span must exceed hip-to-foot distance by 40–50%.
+
+~~**Entities are still boxes.**~~ Per-kind legged rigs landed in `22fd807`:
 `config/Rigs.luau` body plans driven by `client/EntityRig`, with the IK
 solutions finally moving real limbs. Leg count is the silhouette — Lancer 2,
 Sentry 3 (planted, never steps), Reclaimer 6.
