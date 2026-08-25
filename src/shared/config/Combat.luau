@@ -17,5 +17,36 @@ return {
 	--- walks into a frozen huddle would otherwise stay interpenetrated with it
 	--- indefinitely. Not one either — an attacker that repositions at full
 	--- sprint reads as fleeing rather than as adjusting its footing.
-	ATTACK_SHUFFLE_FRACTION = 0.35,
+	--- Lowered from 0.35. Neighbour separation is applied at this speed, and
+	--- with seven entities crowding one player the crowd mutually repels hard
+	--- enough to push everyone back out of attack range. Unstacking should be a
+	--- shuffle, not a shove.
+	ATTACK_SHUFFLE_FRACTION = 0.12,
+
+	--- Standoff distance as a fraction of a kind's attack range. Caps the
+	--- personal-space push so an entity cannot shove itself out of the range it
+	--- is attacking from — the raw hitbox+player sum exceeds `atkRange` for a
+	--- Skitter and ties it for a Hauler.
+	STANDOFF_FRACTION = 0.7,
+
+	--- An engaged entity keeps attacking out to this multiple of its attack
+	--- range. Hysteresis: at 22 studs/s an entity moves 1.1 studs per tick and
+	--- would otherwise flicker across the boundary, swapping a full-speed seek
+	--- for a slow shuffle every few frames.
+	DISENGAGE_FRACTION = 1.5,
+
+	--- Arrival damping. An entity begins slowing this many attack-ranges out,
+	--- so it eases to a stop instead of overshooting and being pushed back.
+	ARRIVAL_BAND = 1.5,
+	--- Floor on the damped approach speed, so an entity still closes the last
+	--- stud rather than creeping forever.
+	ARRIVAL_MIN_FRACTION = 0.22,
+
+	--- Neighbour separation radius while attacking, as a multiple of hitbox
+	--- radius. Tighter than the 2.5 used while moving: six Skitters separating
+	--- at 2.5x need about four studs of radius around their target, which is
+	--- exactly their four-stud attack range — so the crowd pushed itself to the
+	--- edge of the band and hunted in and out of it. An engaged crowd should
+	--- pack in, not hold formation.
+	ATTACK_SEPARATION_FACTOR = 1.5,
 }

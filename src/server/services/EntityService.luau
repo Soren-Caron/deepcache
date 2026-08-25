@@ -296,21 +296,41 @@ function EntityService.step(tick: number, dt: number)
 		--- standing inside them. Also the floor below which the direction *to*
 		--- the target stops being a usable facing: at half a stud, sub-stud
 		--- movement swings that angle through tens of degrees per tick.
-		local personalSpace = entity.hitboxRadius + CombatConfig.PLAYER_RADIUS
+		---
+		--- **Clamped inside attack range**, which the raw sum is not: a Skitter
+		--- wants 1.6 + 2.5 = 4.1 studs of space but only reaches 4.0, so it
+		--- shoved itself out of its own attack range every frame, dropped to
+		--- `move`, walked back in, and shoved itself out again. Reported as
+		--- enemies moving back and forth on the spot, and that is exactly what
+		--- it was. A Hauler had the same bug with 0.1 studs of margin.
+		local personalSpace = math.min(
+			entity.hitboxRadius + CombatConfig.PLAYER_RADIUS,
+			config.atkRange * CombatConfig.STANDOFF_FRACTION
+		)
+
+		--- Hysteresis on the attack band. Without it an entity travelling at
+		--- 22 studs/s covers 1.1 studs per tick and overshoots the boundary,
+		--- so it flickers between `move` and `attack` even once the standoff
+		--- fits -- and each flip swaps a full-speed seek for a slow shuffle,
+		--- which is visible as a stutter.
+		local engaged = entity.state == "attack"
+		local engageAt = config.atkRange
+		local disengageAt = config.atkRange * CombatConfig.DISENGAGE_FRACTION
 
 		local function faceTarget()
 			local desired = Steering.facingYaw(Types.subVec3(target, entity.pos), entity.yaw, personalSpace)
 			entity.yaw = Steering.slewYaw(entity.yaw, desired, config.turnRate, dt)
 		end
 
-		if distance <= config.atkRange then
+		if (not engaged and distance <= engageAt) or (engaged and distance <= disengageAt) then
 			EntityState.transition(entity, "attack")
 
 			-- Previously this zeroed velocity and skipped steering entirely, so
 			-- a crowd a moving player walked into stayed interpenetrated
 			-- forever -- nothing was left to push it apart. An attacker still
 			-- gets to adjust its footing, at a fraction of its speed.
-			local separate = Steering.separate(entity.pos, neighbours, entity.hitboxRadius * 2.5)
+			local separate =
+				Steering.separate(entity.pos, neighbours, entity.hitboxRadius * CombatConfig.ATTACK_SEPARATION_FACTOR)
 			local offTarget = Steering.separate(entity.pos, { target }, personalSpace)
 			local shuffle = Steering.combine({
 				{ force = Types.scaleVec3(separate, config.speed), weight = 0.8 },
@@ -341,11 +361,25 @@ function EntityService.step(tick: number, dt: number)
 		-- A Lancer holds standoff against the target, but only once it can see
 		-- it. Applying keepDistance to a doorway it is walking toward would
 		-- make it back away from its own route and deadlock in the corridor.
+		-- Arrival damping. A Skitter closes at 22 studs/s, which is 1.1 studs
+		-- per tick -- it slams straight through the attack boundary, and the
+		-- crowd's mutual separation then pushes it back out, so it hunts in and
+		-- out around the player instead of settling. Easing the last few studs
+		-- is what makes an approach stop rather than bounce.
+		local approachSpeed = config.speed
+		local band = config.atkRange * CombatConfig.ARRIVAL_BAND
+		if band > 1e-6 and distance < config.atkRange + band then
+			local nearness = math.clamp((distance - config.atkRange) / band, 0, 1)
+			approachSpeed = config.speed
+				* (CombatConfig.ARRIVAL_MIN_FRACTION
+					+ (1 - CombatConfig.ARRIVAL_MIN_FRACTION) * nearness)
+		end
+
 		local seek
 		if behavior == "KeepDistance" and sameRoom(entity.pos, target) then
-			seek = Steering.keepDistance(entity.pos, target, config.preferredDistance or 40, config.speed)
+			seek = Steering.keepDistance(entity.pos, target, config.preferredDistance or 40, approachSpeed)
 		else
-			seek = Steering.seek(entity.pos, waypoint, config.speed)
+			seek = Steering.seek(entity.pos, waypoint, approachSpeed)
 		end
 
 		local separate = Steering.separate(entity.pos, neighbours, entity.hitboxRadius * 2.5)
