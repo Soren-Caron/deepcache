@@ -49,6 +49,18 @@ local DECLARATIONS: { [string]: RemoteKind } = {
 	--- timer rather than the player guessing when they can fire again.
 	ReloadState = "Reliable",
 
+	--- Server -> client. A ranged enemy fired. Purely cosmetic — the damage is
+	--- already resolved server-side — but without it a Sentry at 45 studs and a
+	--- Lancer at 55 hit you from off-screen with nothing to see or trace back.
+	EnemyShot = "Reliable",
+
+	--- Client -> server. Sprint started or stopped. The movement guard budgets
+	--- horizontal speed against a provider, and a sprint it has not been told
+	--- about is indistinguishable from a speed hack -- the same shape as the
+	--- jump that got a player kicked for exceeding a limit they could
+	--- legitimately exceed.
+	SprintState = "Reliable",
+
 	--- Server -> client. Position correction from the movement guard.
 	PositionCorrection = "Reliable",
 

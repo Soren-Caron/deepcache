@@ -98,7 +98,26 @@ function MovementGuardService.setWorldBounds(min: Types.Vec3, max: Types.Vec3)
 	params.worldMax = max
 end
 
+--- Players the client has told us are sprinting. Trusted only as far as it
+--- costs: a client claiming to sprint gets a wider speed budget, never a
+--- different position. The worst a liar achieves is the sprint multiplier they
+--- could have had by pressing the key, which is why this is a remote rather
+--- than something the guard tries to infer.
+local sprinting: { [Player]: boolean } = {}
+
+function MovementGuardService.isSprinting(player: Player): boolean
+	return sprinting[player] == true
+end
+
 function MovementGuardService.init()
+	Remotes.event("SprintState").OnServerEvent:Connect(function(player, value)
+		sprinting[player] = value == true
+	end)
+
+	Players.PlayerRemoving:Connect(function(player)
+		sprinting[player] = nil
+	end)
+
 	Players.PlayerRemoving:Connect(function(player)
 		tracked[player] = nil
 	end)

@@ -24,7 +24,9 @@
 	raycasts would be hit by the combat wall-check on their own body.
 ]]
 
-local RigsConfig = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared").config.Rigs)
+local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
+local RigsConfig = require(Shared.config.Rigs)
+local EnemiesConfig = require(Shared.config.Enemies)
 
 local EntityRig = {}
 
@@ -73,7 +75,19 @@ local specs: { [string]: Spec } = {}
 
 local function buildSpec(kind: string): Spec
 	local entry = (RigsConfig.kinds :: any)[kind] or (RigsConfig.kinds :: any).Skitter
-	local scale = entry.height / REF_HEIGHT
+	local enemy = (EnemiesConfig :: any)[kind]
+
+	-- **Height is derived from `hitboxRadius`, never authored.** The server
+	-- centres a ray-sphere of that radius on the entity's position, and the
+	-- renderer stands the rig on `position - hitboxRadius`, so a body exactly
+	-- `2 * hitboxRadius` tall fills the sphere's vertical extent and nothing
+	-- visible sits outside what can be shot.
+	--
+	-- Authored separately, the two drifted: a Skitter was 4.2 studs tall
+	-- against a 3.2-stud sphere, leaving a full stud of head unhittable, and a
+	-- Lancer 1.6 studs. Reported as bullets passing through them.
+	local height = if enemy ~= nil then enemy.hitboxRadius * 2 else entry.height
+	local scale = height / REF_HEIGHT
 	local build = entry.build
 
 	-- Width scales with `build` but height does not: a Hauler is broad, not
@@ -83,7 +97,7 @@ local function buildSpec(kind: string): Spec
 	local headSize = Vector3.new(1.25 * scale * build, 1.25 * scale, 1.25 * scale * build)
 
 	return {
-		height = entry.height,
+		height = height,
 		scale = scale,
 		torsoSize = torsoSize,
 		headSize = headSize,

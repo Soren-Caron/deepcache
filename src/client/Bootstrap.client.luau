@@ -10,6 +10,7 @@
 local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 
 local Branding = require(Shared.config.Branding)
+local Remotes = require(Shared.net.Remotes)
 local Effects = require("./controllers/Effects")
 local EntityRenderer = require("./controllers/EntityRenderer")
 local PredictionController = require("./controllers/PredictionController")
@@ -18,6 +19,7 @@ local CorrectionController = require("./controllers/CorrectionController")
 local MarketController = require("./controllers/MarketController")
 local LookController = require("./controllers/LookController")
 local RagdollController = require("./controllers/RagdollController")
+local SprintController = require("./controllers/SprintController")
 
 local function main()
 	EntityRenderer.start()
@@ -28,6 +30,8 @@ local function main()
 	CorrectionController.start()
 	MarketController.start()
 	RagdollController.start()
+	SprintController.setHooks({ onStaminaChanged = HudController.setStamina })
+	SprintController.start()
 
 	PredictionController.setHooks({
 		onTracer = function(origin: Vector3, target: Vector3)
@@ -44,6 +48,19 @@ local function main()
 		onWeaponChanged = HudController.setWeapon,
 		onReloadStateChanged = HudController.setReloading,
 	})
+
+	-- Ranged enemies: draw the shot. Server-side the damage has already
+	-- landed; this is the only thing that tells a player where it came from.
+	local ENEMY_BOLT_COLOUR: { [string]: Color3 } = {
+		Sentry = Color3.fromRGB(120, 180, 255),
+		Lancer = Color3.fromRGB(150, 255, 170),
+	}
+	Remotes.event("EnemyShot").OnClientEvent:Connect(function(payload)
+		if typeof(payload) ~= "table" or typeof(payload.from) ~= "Vector3" or typeof(payload.to) ~= "Vector3" then
+			return
+		end
+		Effects.enemyBolt(payload.from, payload.to, ENEMY_BOLT_COLOUR[payload.kind])
+	end)
 
 	PredictionController.start()
 

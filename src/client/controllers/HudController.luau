@@ -30,6 +30,7 @@
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 
 local Remotes = require(Shared.net.Remotes)
@@ -74,6 +75,11 @@ local padLabel: TextLabel
 local statusLabel: TextLabel
 local vitalsLabel: TextLabel
 local commsLabel: TextLabel
+
+local staminaBar: Frame
+local staminaBack: Frame
+local staminaFraction = 1
+local staminaExhausted = false
 
 local crosshair: Frame
 local hitmarker: Frame
@@ -252,11 +258,10 @@ local function render()
 	if now < hitmarkerUntil then
 		hitmarker.Visible = true
 		-- Contracts as it fades, so rapid hits read as distinct marks rather
-		-- than one continuous smear.
+		-- than one continuous smear. Position is set below, from the cursor.
 		local t = (hitmarkerUntil - now) / HITMARKER_SECONDS
 		local size = 16 + 10 * t
 		hitmarker.Size = UDim2.new(0, size, 0, size)
-		hitmarker.Position = UDim2.new(0.5, -size / 2, 0.5, -size / 2)
 	else
 		hitmarker.Visible = false
 	end
@@ -264,11 +269,41 @@ local function render()
 	-- The crosshair dims while dead or extracted: nothing to aim at, and a
 	-- live-looking reticle over a corpse is a small lie.
 	crosshair.Visible = not latest.complete and latest.status ~= "dead"
+
+	-- Follows the cursor rather than sitting at screen centre. Shots are aimed
+	-- where the mouse points, so a fixed centre reticle would be pointing at
+	-- somewhere rounds do not go -- which is the whole complaint it exists to
+	-- answer. `GetMouseLocation` and the GUI both include the inset, so the
+	-- offset needs no correction.
+	staminaBar.Size = UDim2.new(math.clamp(staminaFraction, 0, 1), 0, 1, 0)
+	-- Red while locked out, not merely low: "empty" and "you may not sprint
+	-- yet" are different states, and only the second one explains why the key
+	-- is doing nothing.
+	staminaBar.BackgroundColor3 = if staminaExhausted
+		then ALERT
+		elseif staminaFraction < 0.3 then Color3.fromRGB(220, 170, 90)
+		else GOOD
+	staminaBack.Visible = not latest.complete
+
+	local mouse = UserInputService:GetMouseLocation()
+	crosshair.Position = UDim2.new(0, mouse.X - crosshair.AbsoluteSize.X / 2, 0, mouse.Y - crosshair.AbsoluteSize.Y / 2)
+	hitmarker.Position = UDim2.new(
+		0,
+		mouse.X - hitmarker.AbsoluteSize.X / 2,
+		0,
+		mouse.Y - hitmarker.AbsoluteSize.Y / 2
+	)
 end
 
 --- Confirmed by the server, never predicted.
 function HudController.showHitmarker()
 	hitmarkerUntil = os.clock() + HITMARKER_SECONDS
+end
+
+--- Pushed by SprintController every frame it ticks.
+function HudController.setStamina(fraction: number, exhausted: boolean)
+	staminaFraction = fraction
+	staminaExhausted = exhausted
 end
 
 --- Pushed by PredictionController when the player switches weapons.
@@ -389,6 +424,22 @@ function HudController.start()
 	hurtVignette.Parent = root
 
 	weightLabel = makeLabel(weightPanel, UDim2.new(1, 0, 0, 26), UDim2.new(0, 0, 0, 0), 20, Enum.TextXAlignment.Left)
+	-- Stamina sits directly under the weight bar: both answer "can I get out of
+	-- here", and splitting them across the screen would make the player look in
+	-- two places for one decision.
+	staminaBack = Instance.new("Frame")
+	staminaBack.Size = UDim2.new(0, 320, 0, 5)
+	staminaBack.Position = UDim2.new(0, 24, 1, -44)
+	staminaBack.BackgroundColor3 = Color3.fromRGB(48, 50, 56)
+	staminaBack.BorderSizePixel = 0
+	staminaBack.Parent = root
+
+	staminaBar = Instance.new("Frame")
+	staminaBar.Size = UDim2.new(1, 0, 1, 0)
+	staminaBar.BackgroundColor3 = ACCENT
+	staminaBar.BorderSizePixel = 0
+	staminaBar.Parent = staminaBack
+
 	statusLabel = makeLabel(root, UDim2.new(0, 520, 0, 22), UDim2.new(0, 24, 1, -30), 16, Enum.TextXAlignment.Left)
 	vitalsLabel = makeLabel(root, UDim2.new(0, 200, 0, 30), UDim2.new(1, -224, 1, -60), 24, Enum.TextXAlignment.Right)
 

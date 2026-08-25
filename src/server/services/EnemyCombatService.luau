@@ -24,6 +24,7 @@ local EnemiesConfig = require(Shared.config.Enemies)
 local EnemyAttack = require(Shared.core.sim.EnemyAttack)
 local Types = require(Shared.core.Types)
 
+local Remotes = require(Shared.net.Remotes)
 local EntityService = require("./EntityService")
 local TelemetryService = require("./TelemetryService")
 
@@ -69,6 +70,11 @@ local function canSee(from: Types.Vec3, to: Types.Vec3): boolean
 	end
 	return workspace:Raycast(origin, direction, sightParams) == nil
 end
+
+--- Above this attack range a kind is treated as ranged and its shots are
+--- drawn. Comfortably above every melee kind (Skitter 4, Hauler 6, Reclaimer
+--- 6, Warden 8) and far below the ranged ones (Sentry 45, Lancer 55).
+local MELEE_RANGE = 12
 
 local state = EnemyAttack.new()
 
@@ -149,6 +155,26 @@ function EnemyCombatService.step(_tick: number, _dt: number)
 		end
 
 		humanoid:TakeDamage(strike.damage)
+
+		-- Show the shot. Ranged kinds only: a Skitter biting you at three studs
+		-- does not need a tracer, and drawing one would read as it shooting.
+		--
+		-- The damage above already landed, while the bolt takes about a tenth
+		-- of a second to arrive. That mismatch is deliberate and small: a bolt
+		-- slow enough to be honest would be slow enough to dodge, and the
+		-- server has already decided the hit.
+		local stats = STATS[strike.kind]
+		if stats ~= nil and stats.atkRange > MELEE_RANGE then
+			local entity = EntityService.get(strike.entityId)
+			if entity ~= nil then
+				Remotes.event("EnemyShot"):FireAllClients({
+					kind = strike.kind,
+					from = Vector3.new(entity.pos.x, entity.pos.y, entity.pos.z),
+					to = humanoid.RootPart ~= nil and humanoid.RootPart.Position or Vector3.zero,
+				})
+			end
+		end
+
 		metrics.strikes += 1
 		metrics.damageDealt += strike.damage
 		metrics.lastStrikeKind = strike.kind

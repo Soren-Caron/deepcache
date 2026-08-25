@@ -19,6 +19,8 @@ local Effects = {}
 local TRACER_SECONDS = 0.055
 local FLASH_SECONDS = 0.045
 local IMPACT_SECONDS = 0.20
+--- Flight time for an enemy bolt, whatever the distance.
+local BOLT_SECONDS = 0.11
 
 local container: Folder? = nil
 
@@ -122,6 +124,49 @@ function Effects.impact(position: Vector3, normal: Vector3?)
 		local size = 0.4 + 0.9 * t
 		spark.Size = Vector3.new(size, size, size)
 		spark.Transparency = t
+	end)
+end
+
+--- A travelling bolt from a ranged enemy.
+---
+--- Unlike `tracer`, which is instantaneous because a player's hitscan round
+--- is, this one visibly crosses the gap: a Sentry at 45 studs or a Lancer at
+--- 55 otherwise damages you from off-screen with nothing to see and no
+--- direction to trace back to. The damage has already been resolved
+--- server-side, so the flight is a tenth of a second -- long enough to read,
+--- short enough that it is not pretending to be dodgeable.
+function Effects.enemyBolt(from: Vector3, to: Vector3, colour: Color3?)
+	local delta = to - from
+	local distance = delta.Magnitude
+	if distance < 1 then
+		return
+	end
+	local direction = delta.Unit
+
+	local bolt = makePart()
+	bolt.Color = colour or Color3.fromRGB(255, 130, 90)
+	bolt.Size = Vector3.new(0.22, 0.22, math.min(3.5, distance * 0.25))
+	bolt.Transparency = 0.05
+
+	local light = Instance.new("PointLight")
+	light.Brightness = 2
+	light.Range = 8
+	light.Color = bolt.Color
+	light.Parent = bolt
+
+	local start = os.clock()
+	local connection: RBXScriptConnection
+	connection = RunService.RenderStepped:Connect(function()
+		local t = (os.clock() - start) / BOLT_SECONDS
+		if t >= 1 or bolt.Parent == nil then
+			connection:Disconnect()
+			bolt:Destroy()
+			return
+		end
+		local at = from + direction * (distance * t)
+		bolt.CFrame = CFrame.lookAt(at, at + direction)
+		-- Fades only at the very end, so most of the flight is fully visible.
+		bolt.Transparency = 0.05 + 0.95 * math.max(0, (t - 0.75) / 0.25)
 	end)
 end
 

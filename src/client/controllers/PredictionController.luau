@@ -34,6 +34,51 @@ type Pending = {
 local player = Players.LocalPlayer
 local camera = workspace.CurrentCamera
 
+--- Where a shot is aimed, and where it starts.
+---
+--- Both used to come from the camera, which is wrong in third person for two
+--- separate reasons. The camera sits about ten studs behind the character, so
+--- the drawn tracer began in mid-air behind the player; and the server rejects
+--- an origin further than `ORIGIN_TOLERANCE` (8 studs) from the character and
+--- substitutes its own, so the server was already firing from the character
+--- while the client drew from the camera. They disagreed on every shot.
+---
+--- Now: the aim point is where the *mouse* points, found by casting the
+--- camera's ray through the cursor, and the shot leaves the character's
+--- shoulder toward it. Client and server then agree, and the crosshair
+--- (which follows the cursor) tells the truth about where rounds go.
+local aimParams = RaycastParams.new()
+aimParams.FilterType = Enum.RaycastFilterType.Exclude
+aimParams.IgnoreWater = true
+
+local AIM_RANGE = 2000
+
+local function shoulderOrigin(root: BasePart): Vector3
+	return root.Position + Vector3.new(0, 1.2, 0)
+end
+
+--- World point the cursor is over. Falls back to a far point along the ray
+--- when the cursor is over open sky, so aiming at nothing still fires forward
+--- rather than refusing.
+local function aimPoint(): Vector3
+	local mouse = UserInputService:GetMouseLocation()
+	-- GetMouseLocation is in viewport space including the inset; ScreenPointToRay
+	-- expects the same, so no adjustment is needed.
+	local ray = camera:ViewportPointToRay(mouse.X, mouse.Y)
+	local exclude: { Instance } = {}
+	if player.Character then
+		table.insert(exclude, player.Character)
+	end
+	local effects = workspace:FindFirstChild("DeepcacheEffects")
+	if effects then
+		table.insert(exclude, effects)
+	end
+	aimParams.FilterDescendantsInstances = exclude
+
+	local hit = workspace:Raycast(ray.Origin, ray.Direction * AIM_RANGE, aimParams)
+	return if hit then hit.Position else ray.Origin + ray.Direction * AIM_RANGE
+end
+
 local pending: { [number]: Pending } = {}
 local nextSeq = 1
 local currentWeapon = "Sidearm"
@@ -166,8 +211,13 @@ local function fire()
 
 	lastFireAt = now
 
-	local origin = camera.CFrame.Position
-	local direction = camera.CFrame.LookVector
+	local origin = shoulderOrigin(root)
+	local target = aimPoint()
+	local toTarget = target - origin
+	if toTarget.Magnitude < 1e-3 then
+		return
+	end
+	local direction = toTarget.Unit
 
 	-- Predict presentation immediately. This is what makes the shot feel
 	-- instant regardless of latency.

@@ -107,7 +107,15 @@ local function main()
 		local weight = LootService.carriedWeight(player.UserId)
 		local Loot = require(Shared.core.sim.Loot)
 		local Economy = require(Shared.config.Economy)
-		return LootService.BASE_WALK_SPEED * Loot.speedMultiplier(weight, Economy.weight.tiers :: any)
+		local Movement = require(Shared.config.Movement)
+		local speed = LootService.BASE_WALK_SPEED * Loot.speedMultiplier(weight, Economy.weight.tiers :: any)
+		-- A sprinting player legitimately exceeds walk speed, and a guard that
+		-- does not know about it kicks them for it -- exactly the shape of the
+		-- jump bug, where the budget was a walk speed and gravity was not.
+		if MovementGuardService.isSprinting(player) then
+			speed *= Movement.SPRINT_MULTIPLIER
+		end
+		return speed
 	end)
 
 	EntityService.setTargetProvider(playerTargets)
