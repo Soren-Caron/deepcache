@@ -37,7 +37,6 @@ local PARAMS: Stamina.Params = {
 
 local player = Players.LocalPlayer
 local state = Stamina.new(PARAMS)
-local held = false
 local lastSent: boolean? = nil
 local connection: RBXScriptConnection? = nil
 
@@ -64,6 +63,27 @@ local function humanoid(): Humanoid?
 	return character and character:FindFirstChildOfClass("Humanoid")
 end
 
+--- Is a sprint key down right now?
+---
+--- Polled, not latched on InputBegan/InputEnded. A latch has exactly one
+--- authority for the key -- its own boolean -- and any missed edge desyncs it
+--- from the keyboard until the player releases and presses again. That is not
+--- hypothetical: a trace with shift physically down for five seconds
+--- (`IsKeyDown` true, character moving, bar full) recorded WalkSpeed sitting at
+--- 16, because the controller had seen an InputEnded the player never
+--- performed. Roblox fires those on focus loss. Reading the engine every frame
+--- cannot drift, and is less code than the two connections it replaces.
+---
+--- `GetFocusedTextBox` stands in for the `gameProcessed` flag the event form
+--- gave us: without it, shift while typing in a chat box would sprint.
+local function sprintKeyDown(): boolean
+	if UserInputService:GetFocusedTextBox() ~= nil then
+		return false
+	end
+	return UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
+		or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+end
+
 --- Is the player actually moving? Sprinting on the spot should not drain.
 local function moving(): boolean
 	local h = humanoid()
@@ -85,7 +105,7 @@ local function step(dt: number)
 		baseSpeed = h.WalkSpeed
 	end
 
-	local sprinting = Stamina.step(state, dt, held and moving(), PARAMS)
+	local sprinting = Stamina.step(state, dt, sprintKeyDown() and moving(), PARAMS)
 	h.WalkSpeed = if sprinting then baseSpeed * MovementConfig.SPRINT_MULTIPLIER else baseSpeed
 
 	if sprinting ~= lastSent then
@@ -108,26 +128,12 @@ function SprintController.getState()
 end
 
 function SprintController.start()
-	UserInputService.InputBegan:Connect(function(input, processed)
-		if processed then
-			return
-		end
-		if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
-			held = true
-		end
-	end)
-
-	UserInputService.InputEnded:Connect(function(input)
-		if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
-			held = false
-		end
-	end)
-
 	-- A fresh character arrives at default speed with no sprint state, and the
-	-- server has no idea the old one was sprinting.
+	-- server has no idea the old one was sprinting. `lastSent` is cleared too,
+	-- so the next step re-sends even if the boolean has not changed -- the
+	-- server's per-player sprint flag does not survive the respawn either.
 	player.CharacterAdded:Connect(function()
 		Stamina.reset(state, PARAMS)
-		held = false
 		lastSent = nil
 	end)
 

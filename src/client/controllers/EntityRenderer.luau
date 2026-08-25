@@ -83,6 +83,29 @@ local folder: Folder? = nil
 local active: { [number]: EntityRig.Rig } = {}
 local connection: RBXScriptConnection? = nil
 
+--- Entity hitboxes as of the last rendered frame, published for the aim ray.
+---
+--- Rig parts are `CanQuery = false` (see EntityRig's header for why), so a
+--- Roblox raycast through the cursor passes straight through every enemy and
+--- lands on the floor behind them. Aiming from the shoulder at *that* point
+--- then walks the shot past the target, because the camera sits about ten
+--- studs behind the shoulder and the parallax grows with range -- measured as
+--- four consecutive misses on a Warden eight studs wide, aimed dead centre,
+--- while the server's trace reported the ray stopping on the floor thirty
+--- studs away.
+---
+--- Publishing the interpolated positions lets the aim ray test the same
+--- spheres the server will, using the same pure `core/sim/Raycast`. Rendered
+--- positions, not `baseline`: the player aims at what they can see.
+local aimViews: { Types.EntityView } = {}
+local aimRadii: { [number]: number } = {}
+
+--- Hitboxes to aim at, and their radii by id. Both are rebuilt each frame and
+--- must be treated as read-only by callers.
+function EntityRenderer.aimTargets(): ({ Types.EntityView }, { [number]: number })
+	return aimViews, aimRadii
+end
+
 local stats = {
 	snapshotsReceived = 0,
 	bytesReceived = 0,
@@ -334,6 +357,25 @@ local function render(dt: number)
 	end
 	profile.interpolationMs = (os.clock() - interpStart) * 1000
 	debug.profileend()
+
+	-- Republish the aim hitboxes for this frame. Rebuilt rather than mutated so
+	-- a despawned entity cannot linger as something the cursor still snaps to.
+	table.clear(aimViews)
+	table.clear(aimRadii)
+	for id, sample in samples do
+		local radius = HITBOX_LIFT[sample.kind]
+		if radius ~= nil then
+			table.insert(aimViews, {
+				id = id,
+				kind = sample.kind,
+				pos = sample.pos,
+				yaw = sample.yaw or 0,
+				state = sample.state,
+				hpPct = sample.hpPct or 1,
+			})
+			aimRadii[id] = radius
+		end
+	end
 
 	-- The R6 rig plants feet by pose rather than by ground probe, so the
 	-- 24-ray frame budget that `Lod.allocateRaycasts` exists to divide is

@@ -754,6 +754,64 @@ local function main()
 		))
 		return rows
 	end)
+	-- Start the run over without restarting the server.
+	--
+	-- A run ends the moment the last active player dies, and in a solo Studio
+	-- session that is one death: `endReason="squadResolved"`, `active=0`, the
+	-- wave scheduler correctly reports `run_inactive` forever, and the HUD keeps
+	-- showing `LOST` after the character respawns -- which also hides the
+	-- crosshair. All of that is right for an extraction shooter and useless for
+	-- playtesting, where the loop under test is the thirty seconds after
+	-- contact and it costs a server restart to see it twice.
+	--
+	-- This is the cheap fix, not the honest one. The honest one is a lobby and
+	-- a redeploy, which is a real feature with a real UI; see docs/13 §3.
+	Diagnostics.register("runRestart", function(seed: number?)
+		-- Order matters. Entities die before the run is rebuilt, or the first
+		-- tick of the new run inherits a swarm that was spawned against the old
+		-- one's budget and the difficulty curve starts halfway up.
+		WaveService.reset()
+		for _, view in EntityService.views() do
+			EntityService.remove(view.id)
+		end
+		EnemyCombatService.reset()
+
+		-- A dead player has to be back on their feet before `start`, because
+		-- `Run.new` takes the roster as active and a corpse cannot extract.
+		local respawned = 0
+		for _, player in Players:GetPlayers() do
+			local character = player.Character
+			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+			if humanoid == nil or humanoid.Health <= 0 then
+				player:LoadCharacter()
+				respawned += 1
+			else
+				humanoid.Health = humanoid.MaxHealth
+			end
+		end
+
+		-- `start` calls LootService.populate, which clears the ground *and* every
+		-- carry, so a restart cannot bank loot picked up in the previous run.
+		local usedSeed = seed or Rooms.defaultSeed
+		RunLifecycleService.start(usedSeed)
+
+		-- Carry is now empty but the HUD's weight bar still shows the old
+		-- number: CarryUpdate only fires on pickup and drop, and neither
+		-- happened. Push it explicitly, which also restores WalkSpeed for anyone
+		-- who was crawling under a full load when the run ended.
+		for _, player in Players:GetPlayers() do
+			LootService.refresh(player)
+		end
+
+		return {
+			seed = usedSeed,
+			respawned = respawned,
+			entitiesRemaining = EntityService.count(),
+			run = RunLifecycleService.describe(),
+			waves = WaveService.describe(),
+		}
+	end)
+
 	Diagnostics.register("clearLevel", function()
 		LevelService.clear()
 		return "level cleared, scaffolding restored"
@@ -1297,6 +1355,47 @@ local function main()
 			EntityService.spawn(kind :: any, { x = math.cos(angle) * r, y = y, z = math.sin(angle) * r }, tick)
 		end
 		return EntityService.count()
+	end)
+
+	-- `spawn` above rings the *world origin*, which quietly invalidates any
+	-- positional test run from anywhere else: the entities land outside the
+	-- player's interest radius, never replicate, and the result reads as a
+	-- rendering or targeting failure. This rings the player instead, grounded
+	-- the same way WaveService grounds a real spawn point.
+	Diagnostics.register("spawnAt", function(kind: string?, count: number?, distance: number?)
+		local player = Players:GetPlayers()[1]
+		local character = player and player.Character
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		if root == nil or not root:IsA("BasePart") then
+			return { error = "no character" }
+		end
+		local enemyKind = kind or "Hauler"
+		local config = (require(Shared.config.Enemies) :: any)[enemyKind]
+		if config == nil then
+			return { error = `unknown kind {enemyKind}` }
+		end
+
+		-- Face the direction the character is facing, so a single entity lands in
+		-- front rather than at an arbitrary compass point behind the camera.
+		local forward = root.CFrame.LookVector
+		local n = count or 1
+		local radius = distance or 22
+		local tick = TickService.getTick()
+		local ids: { number } = {}
+		local placed: { string } = {}
+		for i = 1, n do
+			local angle = if n == 1 then 0 else ((i - 1) / n) * math.pi * 2
+			local direction = CFrame.fromAxisAngle(Vector3.yAxis, angle) * forward
+			local at = root.Position + Vector3.new(direction.X, 0, direction.Z).Unit * radius
+			-- Centre the hitbox a radius above the floor, or the sphere sinks
+			-- into it and shots at the lower half stop on the ground.
+			local entity = EntityService.spawn(enemyKind :: any, {
+				x = at.X, y = root.Position.Y - 3 + config.hitboxRadius, z = at.Z,
+			}, tick)
+			table.insert(ids, entity.id)
+			table.insert(placed, string.format("id=%d at (%.1f, %.1f, %.1f)", entity.id, entity.pos.x, entity.pos.y, entity.pos.z))
+		end
+		return { kind = enemyKind, ids = ids, placed = placed, count = EntityService.count() }
 	end)
 
 	TickService.start()

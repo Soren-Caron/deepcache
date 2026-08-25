@@ -3,9 +3,20 @@
 Working notes for picking this back up. Ordered by what most changes the
 experience, not by what is easiest.
 
-Branch: **`feat/wave-spawner`**, five commits ahead of `master`, unmerged.
+Branch: **`feat/wave-spawner`**, **16 commits ahead of `master`, unmerged.**
 
 ```
+(this)   Add runRestart, fix sprint-after-respawn and third-person aim parallax
+76364c5  Fix enemy hitboxes, third-person aim, enemy shot visuals; add sprint
+4f81360  Make weapons reloadable (R, auto on empty, timed)
+80eef40  Stop enemies hunting in and out of attack range
+d3b7de3  Plant enemies on the floor and retune the walk cycle
+856ac8b  Replace IK limbs with an R6 skeleton matching the player
+e6e9fd2  Plan humanoid rigs (docs/14)
+870a534  Fix knee pole and bound planted feet to leg reach
+5c9dc27  Update next-steps: rigs done, animation budget now tight
+22fd807  Give enemies bodies and the level a per-zone palette
+3cb3cbd  Add docs/13-NEXT.md handoff notes
 06618ce  Game feel pass: per-kind enemies, crosshair, hitmarker, hit feedback
 091c16c  Fix unwinnable difficulty and invisible attackers
 4cb65eb  Fix enemy grounding, facing, and crowd spacing
@@ -13,100 +24,171 @@ ff9f3b1  Make enemies actually deal damage (M2-4 adapter half)
 a0d484d  Wire the enemy budget into real spawns (M2-8 adapter half)
 ```
 
-State: **885 pure-core · 139 backend · 18 sim** tests green, 138 files pass
-syntax and encoding, `rojo build` clean.
+State: **935 pure-core · 139 backend** tests green, 146 files pass syntax and
+encoding, `rojo build` clean.
+
+**The branch is the largest outstanding decision here.** Sixteen commits, every
+one of which is a bug the game visibly had, sitting on a branch named after the
+first of them. Merging it is not a formality.
 
 ---
 
 ## 1. Unverified, verify first
 
-**The hurt vignette has never been seen firing.** It is built, wired, and
-present in the HUD (confirmed clear at rest), but the damage probe did not
-land a hit on the run it was tested (HP 100 → 100), so the trigger path is
-unproven. Re-run with a live wave rather than a probe:
+~~**Sprint has never been driven by an actual key press.**~~ Verified with
+`user_keyboard_input`. WalkSpeed 16 → 25.60 (16 × 1.6), full bar to empty in
+4.65 s against a configured 4.55, regen 14.1/s against a configured 14, speed
+dropping back to 16 the frame the bar hit zero. Two full drain/recover cycles
+from a *single* `InputBegan`, which is the stutter cycle
+`tests/stamina.spec.luau` asserts, now observed in the engine.
 
-```lua
-bridge:Invoke("enemyDamageProbe", "Skitter", 3, 8)
-```
+The trace also caught a real bug, since fixed: `held` was a latch fed only by
+InputBegan/InputEnded, and `CharacterAdded` cleared it — so **sprint was dead
+after every respawn** until the player released and re-pressed shift. It now
+polls `IsKeyDown`, which cannot desync from the keyboard.
 
-and sample `BackgroundTransparency` on the full-screen frame from the
-**Client** datamodel while it runs.
+Guard impact measured by A/B: 9 s of sprinting produced 4 violations and 0
+corrections; 9 s of *walking* the same path produced the same 4. Sprint is
+guard-neutral. Those 4 are pre-existing background noise that decays and has
+never reached the correction threshold of 5 — unexplained, not caused by
+sprint, and worth a look if it ever climbs.
 
-**The hitmarker has never been seen firing either.** It cannot be triggered
-from the server: `weaponProbe` calls `CombatService.submit` directly, so the
-resulting `FireResult` carries a `seq` the client never sent, and
-`PredictionController.onFireResult` correctly drops it as unknown. It needs a
-human clicking, or a `VirtualInputManager` path the command bar cannot reach.
+~~**The hurt vignette has never been seen firing.**~~ Verified: 5 flashes,
+32 tinted frames, peak transparency 0.380 against the authored
+`1 - HURT_PEAK_TRANSPARENCY` = 0.38, colour RGB(150, 20, 20), each flash
+tracking an HP drop (100 → 76 → 52 → 29 → 6) with the quadratic fade visible
+across ~0.45 s.
+
+The reason it had never fired is worth keeping: **the probe was being run
+after the player had already died**, so the run was `complete`, and
+`EnemyCombatService`'s strike predicate correctly refused every attack —
+`livingTargets()` returned nothing and the probe reported 0 strikes with no
+error. The doc blamed the probe. It was §3's dead run all along. Run
+`runRestart` first and it lands 13 strikes.
+
+~~**The hitmarker has never been seen firing either.**~~ Verified with
+`user_mouse_input`: 4 clicks, 4 confirmed hits, 4 hitmarker appearances, each
+within ~10 ms of its `FireResult`. Two things make this reproducible, and both
+cost hours to find:
+
+- **`GetGuiInset()` is (0, 58) here.** `user_mouse_input` takes
+  inset-*excluded* coordinates; `GetMouseLocation` returns inset-*included*
+  ones. Clicking at a raw `WorldToViewportPoint` aims 58 px high.
+- **Aim at a kind that does not move.** Only the Sentry is planted. Against a
+  Hauler or Warden the target has walked out from under the cursor by the time
+  the click arrives, and the resulting miss looks exactly like a broken
+  hitmarker.
+
+**The R6 rig's animation cost has not been re-profiled.** The IK rig measured
+1.494 ms against a 2.0 ms budget; rigid limbs should be cheaper, but "should
+be" is not a measurement, and the M7-10 figure in `docs/metrics/m7.md` is
+stale either way.
 
 ---
 
 ## 2. Things that are wired but hollow
 
 **No audio at all.** M7-8. Every hit, shot, death, and zone transition is
-silent, and this is now the single largest gap between how the game plays and
-how it feels. Needs real sound assets, which is the blocker — the structure
-around them is not hard.
+silent, and this is the single largest gap between how the game plays and how
+it feels. Needs real sound assets, which is the blocker — the structure around
+them is not hard.
 
-**No damage direction indicator.** You know you were hit (vignette) but not
-from where. Enemies attack from up to 55 studs and the Sentry is static, so
-"which way do I turn" is the question the HUD currently cannot answer.
-Requires the attacker position, which `EnemyCombatService` already has — it
-would need a remote, or to ride an existing one.
+**No damage direction indicator.** You know you were hit (vignette) and now you
+can see the bolt (`Effects.enemyBolt`), but only if you were already facing the
+shooter. Enemies attack from up to 55 studs and the Sentry is static, so "which
+way do I turn" is still the question the HUD cannot answer.
+`EnemyCombatService` already has the attacker position and already fires
+`EnemyShot` — the indicator could ride that remote rather than needing a new
+one.
 
-**Enemies should be humanoid, not boxes with legs.** Planned in
-[docs/14-HUMANOID-RIGS.md](14-HUMANOID-RIGS.md) — read that before touching
-the rig. The current legged rig measures **0.990 limb straightness** (1.0 is a
-rigid stick): a Skitter spends 67% of its leg span on the hip-to-foot drop,
-leaving nothing to bend with. That is structural, not cosmetic, and two rounds
-of proportion tuning did not fix it. The humanoid plan carries the constraint
-forward as a rule: limb span must exceed hip-to-foot distance by 40–50%.
+**Nothing teaches weapon switching or reloading.** Elites beat a Sidearm
+one-on-one *by design* (Warden 700 HP at 15.7 dps, Reclaimer 550 at 26), which
+is fine because 1–4 switch and R reloads — but the game never says so, and
+there is no ammo economy pressure that forces the discovery.
 
-~~**Entities are still boxes.**~~ Per-kind legged rigs landed in `22fd807`:
-`config/Rigs.luau` body plans driven by `client/EntityRig`, with the IK
-solutions finally moving real limbs. Leg count is the silhouette — Lancer 2,
-Sentry 3 (planted, never steps), Reclaimer 6.
-
-**Animation budget is now tight.** Driving 280 parts took animation+IK from
-**0.439 ms to 1.494 ms against a 2.0 ms budget** — 75% where it was 22%. It
-passes, but the M7-10 figure in `docs/metrics/m7.md` is now stale and the
-headroom is materially thinner. Re-profile before adding anything to the
-frame. Cheapest lever if it needs one: tighten the `full` LOD band from 40
-studs, since 25 of 32 entities currently qualify for full IK.
-
-**M7-3's "no popping at LOD transitions" is now testable** and has not been
-tested. There is real limb geometry to pop, and a `full`→`reduced` transition
-swaps IK for a straight-line pose, which is exactly where a visible snap
-would live.
+~~**Enemies should be humanoid.**~~ Landed in `856ac8b`. R6 rigid limbs, the
+same skeleton the player character uses; see
+[docs/14-HUMANOID-RIGS.md §0](14-HUMANOID-RIGS.md) for why the IK plan in that
+same document is wrong.
 
 ---
 
 ## 3. Known bugs and rough edges
 
-**A run ends permanently on player death.** `endReason="squadResolved"`,
-`active=0`, and the wave scheduler then correctly reports `run_inactive`
-forever. A single-player Studio session is one death and done, and the HUD
-keeps showing `LOST — everything you carried is on the floor` after respawn,
-which also suppresses the crosshair. Correct for an extraction shooter,
-actively painful for playtesting. A `runRestart` diagnostic is the cheap fix;
-a real lobby/redeploy loop is the honest one.
+~~**A run ends permanently on player death.**~~ Cheap fix landed:
+`bridge:Invoke("runRestart")` clears entities, resets the wave scheduler and
+enemy cooldowns, revives or respawns the roster, restarts the clock, and
+re-pushes carry so the HUD's weight bar and WalkSpeed are not left stale.
+Verified: `complete=true, active=0, died=1, lastReason=run_inactive` →
+`complete=false, active=1, died=0, lastReason=cooldown`, and the HUD goes from
+`LOST — everything you carried is on the floor` with the crosshair hidden back
+to `0 carried · 0 credits at risk` with crosshair and stamina bar visible. No
+client change was needed; the 1 Hz `RunState` push does it.
+
+**A real lobby/redeploy loop is still the honest fix** — `runRestart` is a
+command-bar call, not something a player can reach. But the dead end was
+blocking every other verification on this list (see §1's vignette entry, where
+it had been masquerading as a broken probe for weeks), so it was worth doing
+first.
+
+**Shots ignored enemies when aiming past them.** Fixed, and the numbers are
+worth keeping because they explain "sometimes the bullet doesn't hit them".
+Enemy rig parts are `CanQuery = false`, so `aimPoint`'s raycast passed through
+every enemy and stopped on the backdrop; the shot then left the *shoulder*
+aimed at that far point, and the camera is 12.59 studs behind it. Measured
+against a Sentry (radius 2.2) at 26 studs:
+
+| backdrop distance | shot misses centre by | outcome |
+|---:|---:|---|
+| 40 | 0.21 | hit |
+| 80 | 1.94 | hit, barely |
+| 120 | 2.39 | **miss** |
+| 2000 (open sky) | 3.11 | **miss** |
+
+So a corridor forgave it completely and an open hall never did — which is
+exactly the shape of an intermittent bug. `aimPoint` now intersects the entity
+spheres with the same pure `core/sim/Raycast` the server judges the shot with,
+via `EntityRenderer.aimTargets()`. Same shot afterwards: 0.28 off centre.
+Pinned by `tests/raycast.spec.luau` §third-person aim parallax.
+
+Note this is *not* what made the hitmarker verification pass — that was the
+GUI-inset correction above. The parallax bug was found while chasing it.
+
+**Warden's hittable fraction got slightly worse.** The hitbox/rig-height fix in
+`76364c5` cut unhittable body from 1.00 → 0.14 studs on a Skitter and 1.60 →
+0.20 on a Lancer, but moved the Warden 0.20 → 0.39. The residue is the top of
+the head, where a sphere has little horizontal extent anyway. Not zero, and not
+claimed to be.
 
 **`onDespawn` releases the part but never removes the entity from
-`baseline`.** Harmless today because the next snapshot re-adds it, but it
-means the client's baseline can only grow within a run. Worth tightening
-before it becomes the cause of something.
+`baseline`.** Harmless today because the next snapshot re-adds it, but the
+client's baseline can only grow within a run.
 
-**`spawn` diagnostic rings the world origin, not the player.** Every
-positional test using it is confounded when the player is far from origin —
-entities land outside interest and never replicate. Prefer `losProbe` or
-`enemyDamageProbe`, which place relative to the character.
+~~**`spawn` diagnostic rings the world origin, not the player.**~~ `spawnAt`
+added alongside it: rings the *player*, faces the character's look vector, and
+lifts each entity by its own `hitboxRadius` so the sphere is not half-sunk in
+the floor. `spawn` is left as it was — several older notes quote its output.
 
 ---
 
-## 4. Balance, now that it is playable
+## 4. Documentation that contradicts itself
 
-The numbers were set to clear the guards in
-`tests/enemyAttack.spec.luau` (documented in docs/01 §Scaling →
-Survivability), not from play. They deserve a real pass:
+**`docs/11-INTERVIEW-ARTIFACTS.md` states planning-era numbers as
+measurements** — "fallback rate under 3%", "$0.08 per run", "p95 confirmation
+at X ms". They were targets set before anything ran, and they now contradict
+`resume.md` and `docs/12-POSTMORTEM.md`, which carry measured figures. Either
+annotate them as targets or replace them with what was measured. Leaving a
+portfolio document making unbacked numeric claims is the worst of the three
+options.
+
+**`resume.md` is untracked.** It exists at the repo root and is not in git.
+
+---
+
+## 5. Balance, now that it is playable
+
+The numbers were set to clear the guards in `tests/enemyAttack.spec.luau`
+(documented in docs/01 §Scaling → Survivability), not from play.
 
 | Knob | Current | Note |
 |---|---|---|
@@ -115,37 +197,55 @@ Survivability), not from play. They deserve a real pass:
 | Hauler `capPerWave` | 3 | Was 4; a 30-damage swing means 4 hits is a kill |
 | Wave interval | 12 s | A *minimum*, not a guarantee — gated on outstanding budget |
 | `MAX_ALIVE` | 32 | Pinned to `INTEREST_MAX`; do not raise independently |
+| `SPRINT_MULTIPLIER` | 1.6 | Untuned by play; multiplies the carry penalty |
 
-**Elites beat a Sidearm one-on-one by design** (Warden 700 HP at 15.7 dps,
-Reclaimer 550 at 26). That is fine *because* weapons 1–4 are now switchable —
-but nothing teaches the player that, and there is no ammo economy pressure
-pushing them to switch.
+Sprint changes disengagement in a way none of these numbers account for: a
+player who can outrun a Skitter has a new answer to every fight the difficulty
+pass assumed they had to take.
 
 ---
 
-## 5. Still open from earlier milestones
+## 6. Still open from earlier milestones
 
-- **M0-8** — publish the place; enable *Allow HTTP Requests* and *Studio
-  Access to API Services*; create the `Lobby` place. Blocks M5-3/M5-6/M5-7
-  (the matchmaking teleport path has never run against two real places) and
-  the `EditableImage` ramps, which compute correctly but cannot be displayed.
+- **M0-8** — publish the place; enable *Allow HTTP Requests* and *Studio Access
+  to API Services*; create the `Lobby` place. Blocks M5-3/M5-6/M5-7 (the
+  matchmaking teleport path has never run against two real places) and the
+  `EditableImage` ramps, which compute correctly but cannot be displayed.
 - **M6-11** — deploy the backend. Roblox production servers cannot reach
-  `localhost`.
+  `localhost`, so the director and telemetry are Studio-only until this lands.
 - **M7-6 / M7-8** — outlines and audio. Both asset work.
-- **M7-11 / M7-13** — playtest with 4+ humans, and the demo video.
+- **M7-11 / M7-13** — playtest with 4+ humans, and the demo video. Both are
+  gated on M0-8 and on the death/restart problem in §3.
 
 ---
 
-## 6. The pattern worth remembering
+## 7. The pattern worth remembering
 
-Five separate features in this branch were **fully built and never
+Seven separate features in this branch were **fully built and never
 connected**: the budget planner, enemy damage, `entity.targetId`, weapon
-switching, and the hitmarker hooks. Each looked complete from the code and was
-invisible in play.
+switching, the hitmarker hooks, reload, and `Enemies.Lancer.projectile`. Each
+looked complete from the code and was invisible in play.
 
 Two more were **dropped in transit**: `kind` and `hpPct`, both silently
 discarded by `Interpolator`'s hand-built `Sample` while every snapshot
 round-trip test passed.
+
+Two more were **authored twice and allowed to drift**: rig height and
+`hitboxRadius` described the same body from different files, so a Lancer had
+1.6 studs of head that could not be shot.
+
+And one was **invisible to the tool that was supposed to find it**: enemy rig
+parts are `CanQuery = false`, so the client's aim raycast could not see the
+things the player was aiming at, and the shot silently used a point behind them
+instead. Nothing errored; the aim was simply wrong by an amount that depended
+on the room.
+
+A newer entry in the same ledger: **three separate features looked broken and
+were not**. The vignette, the hitmarker, and `enemyDamageProbe` were all
+working the whole time — hidden behind a dead run, a 58-pixel GUI inset, and a
+target that had walked away. Before concluding a feature is broken, check that
+the harness is telling the truth: prove the *setup* holds (is the run live? is
+the cursor where you think?) before believing the measurement.
 
 When something seems missing in-game, check the wiring before the logic — and
 prefer a probe registered from the live context over anything `require`d from

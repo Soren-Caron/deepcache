@@ -21,6 +21,9 @@ local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 local WeaponsConfig = require(Shared.config.Weapons)
 local Remotes = require(Shared.net.Remotes)
 local Wire = require(Shared.net.Wire)
+local Types = require(Shared.core.Types)
+local Raycast = require(Shared.core.sim.Raycast)
+local EntityRenderer = require("./EntityRenderer")
 
 local PredictionController = {}
 
@@ -60,6 +63,11 @@ end
 --- World point the cursor is over. Falls back to a far point along the ray
 --- when the cursor is over open sky, so aiming at nothing still fires forward
 --- rather than refusing.
+--- Entity states a shot passes through, matching what the server refuses to
+--- register a hit against. Aiming at a corpse would otherwise pull the shot off
+--- the live enemy standing behind it.
+local AIM_SKIP_STATES: { [Types.EntityStateName]: boolean } = { death = true, spawn = true }
+
 local function aimPoint(): Vector3
 	local mouse = UserInputService:GetMouseLocation()
 	-- GetMouseLocation is in viewport space including the inset; ScreenPointToRay
@@ -76,6 +84,29 @@ local function aimPoint(): Vector3
 	aimParams.FilterDescendantsInstances = exclude
 
 	local hit = workspace:Raycast(ray.Origin, ray.Direction * AIM_RANGE, aimParams)
+	local geometryDistance = if hit then hit.Distance else AIM_RANGE
+
+	-- Enemies are invisible to the engine's raycaster: their rig parts are
+	-- `CanQuery = false`, so the cast above sails through them onto the floor
+	-- behind. Firing from the shoulder at that far point misses, because the
+	-- camera is roughly ten studs behind the shoulder and the parallax between
+	-- the two grows with distance to the aim point. So test the entity spheres
+	-- explicitly, with the same pure math the server will use to judge the
+	-- shot -- one implementation, so client and server cannot disagree about
+	-- what the cursor was over.
+	local views, radii = EntityRenderer.aimTargets()
+	local entityHit = Raycast.nearestEntity(
+		Wire.toVec3(ray.Origin),
+		Wire.toVec3(ray.Direction.Unit),
+		views,
+		radii,
+		geometryDistance,
+		AIM_SKIP_STATES
+	)
+	if entityHit ~= nil then
+		return Vector3.new(entityHit.point.x, entityHit.point.y, entityHit.point.z)
+	end
+
 	return if hit then hit.Position else ray.Origin + ray.Direction * AIM_RANGE
 end
 

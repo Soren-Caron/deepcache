@@ -109,3 +109,84 @@ t.describe("sim/Raycast headshot", function()
 		expect(Raycast.isHeadshot(v3(0, -1, 0), v3(0, 0, 0), 2, 0.6)).toBeFalsy()
 	end)
 end)
+
+--------------------------------------------------------------------------------
+-- Third-person aim parallax.
+--
+-- Not a test of Raycast's arithmetic so much as of the geometry lesson behind
+-- how the client aims. Enemy rig parts are `CanQuery = false`, so a Roblox
+-- raycast through the cursor sails past them and stops on whatever is behind.
+-- The shot then leaves the *shoulder*, roughly twelve studs in front of the
+-- camera, aimed at that far point -- and the two rays diverge in proportion to
+-- how much further the backdrop is than the target.
+--
+-- Measured in Studio against a Sentry (radius 2.2) at 26 studs, camera 12.6
+-- studs behind the shoulder: a backdrop at 40 studs left the shot 0.21 off
+-- centre and it hit; open sky left it 3.11 off centre and it could not hit at
+-- any range. The fix is to aim at the sphere the server will actually test,
+-- which is what these cases pin.
+--------------------------------------------------------------------------------
+
+t.describe("sim/Raycast third-person aim parallax", function()
+	--- Perpendicular distance from `centre` to the ray from `origin` toward
+	--- `aim` -- how far off centre a shot fired at `aim` passes.
+	local function missDistance(origin: Types.Vec3, aim: Types.Vec3, centre: Types.Vec3): number
+		local d = Types.normalize(Types.subVec3(aim, origin))
+		local toCentre = Types.subVec3(centre, origin)
+		local projection = toCentre.x * d.x + toCentre.y * d.y + toCentre.z * d.z
+		local lengthSq = toCentre.x * toCentre.x + toCentre.y * toCentre.y + toCentre.z * toCentre.z
+		return math.sqrt(math.max(0, lengthSq - projection * projection))
+	end
+
+	-- The Studio geometry, reduced to round numbers. The offset that matters is
+	-- the one *across* the line of fire, not the one along it: a camera directly
+	-- behind the shoulder produces no parallax at all. Roblox's third-person
+	-- camera sits behind and well above, and it is the height that does the
+	-- damage.
+	local CAMERA = v3(0, 8, -10)
+	local SHOULDER = v3(0, 0, 0)
+	local TARGET = v3(0, 0, 26)
+	local RADIUS = 2.2
+
+	t.it("aiming at a distant backdrop misses a target the cursor is over", function()
+		-- The camera ray passes exactly through the target centre, so the cursor
+		-- is dead on it. Extended to a backdrop 200 studs out, the shoulder shot
+		-- aimed there still misses -- which is the whole bug.
+		local direction = Types.normalize(Types.subVec3(TARGET, CAMERA))
+		local backdrop = Types.addVec3(CAMERA, Types.scaleVec3(direction, 200))
+		expect(missDistance(SHOULDER, backdrop, TARGET) > RADIUS).toBeTruthy()
+	end)
+
+	t.it("aiming at the sphere the ray actually meets hits it", function()
+		local direction = Types.normalize(Types.subVec3(TARGET, CAMERA))
+		local hit = Raycast.nearestEntity(
+			CAMERA,
+			direction,
+			{ view(1, TARGET.x, TARGET.y, TARGET.z) },
+			{ [1] = RADIUS },
+			2000
+		) :: Raycast.SphereHit
+		expect(hit).never().toBeNil()
+		expect(missDistance(SHOULDER, hit.point, TARGET) <= RADIUS).toBeTruthy()
+	end)
+
+	t.it("the error grows with how far past the target the backdrop is", function()
+		-- Monotonic, which is why a corridor forgave the bug and an open hall
+		-- did not: "sometimes the bullet does not hit them" was this.
+		local direction = Types.normalize(Types.subVec3(TARGET, CAMERA))
+		local previous = -1
+		for _, distance in { 40, 60, 80, 120, 200, 500, 2000 } do
+			local backdrop = Types.addVec3(CAMERA, Types.scaleVec3(direction, distance))
+			local miss = missDistance(SHOULDER, backdrop, TARGET)
+			expect(miss > previous).toBeTruthy()
+			previous = miss
+		end
+	end)
+
+	t.it("a backdrop close behind the target is nearly harmless", function()
+		-- The reason this survived to now: in a tight room the bug is invisible.
+		local direction = Types.normalize(Types.subVec3(TARGET, CAMERA))
+		local backdrop = Types.addVec3(CAMERA, Types.scaleVec3(direction, 40))
+		expect(missDistance(SHOULDER, backdrop, TARGET) < RADIUS).toBeTruthy()
+	end)
+end)
