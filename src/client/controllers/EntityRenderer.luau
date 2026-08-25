@@ -22,8 +22,6 @@ local Snapshot = require(Shared.core.net.Snapshot)
 local Types = require(Shared.core.Types)
 local Remotes = require(Shared.net.Remotes)
 local Lod = require(Shared.core.anim.Lod)
-local StepPlanner = require(Shared.core.anim.StepPlanner)
-local TwoBoneIk = require(Shared.core.anim.TwoBoneIk)
 local RigsConfig = require(Shared.config.Rigs)
 local EntityRig = require("./EntityRig")
 
@@ -89,56 +87,17 @@ local stats = {
 -- M7-3: procedural locomotion, LOD'd, with a hard per-frame raycast budget.
 --------------------------------------------------------------------------------
 
---- Gait profile per kind, read from the rig body plan so the legs the planner
---- steps are exactly the legs the renderer draws. Previously one generic
---- quadruped drove every kind while the geometry was a single box, so the two
---- could not disagree; now they can, and sharing one source is what stops them.
-local GAIT: { [string]: { offsets: { Types.Vec3 }, groups: { number }, reach: number } } = {}
-for kind, spec in RigsConfig :: any do
-	local offsets: { Types.Vec3 } = {}
-	local groups: { number } = {}
-	local drop = 0
-	for index, leg in spec.legs do
-		offsets[index] = Types.vec3(leg.offset.x, leg.offset.y, leg.offset.z)
-		groups[index] = leg.group
-		drop = math.max(drop, math.abs(leg.offset.y))
-	end
-
-	-- How far a foot may sit from its rest position before the leg cannot
-	-- reach it. The leg spans `upper + lower`; most of that is spent on the
-	-- vertical drop from hip to floor, and what is left is the horizontal
-	-- budget. Pythagoras rather than a guessed constant, so retuning a body
-	-- plan cannot silently leave the gait asking for the impossible.
-	local span = spec.upperLength + spec.lowerLength
-	local vertical = drop + spec.bodyOffsetY * 0.4
-	local horizontal = if span > vertical then math.sqrt(span * span - vertical * vertical) else 0.2
-	GAIT[kind] = { offsets = offsets, groups = groups, reach = math.max(horizontal, 0.2) }
-end
-
---- The pole decides which way a knee bends, and it must be *perpendicular* to
---- the hip-to-foot axis. A standing leg is close to vertical, so the obvious
---- (0,1,0) is near-parallel to it: its perpendicular component collapses,
---- TwoBoneIk falls back to `anyPerpendicular`, and the chosen direction then
---- swings between cardinal axes on tiny numerical differences. Every leg bends
---- somewhere different and the result reads as an insect rather than a
---- machine. A horizontal pole along the body's forward axis gives a stable,
---- consistent forward-bending knee.
-local POLE_LOCAL = Vector3.new(0, 0, 1)
+--- Per-entity render scale, set during interpolation (death collapse, spawn
+--- materialise) and consumed by the animation pass a few lines later.
+local animScale: { [number]: number } = {}
 
 type Locomotion = {
-	gait: StepPlanner.GaitState,
-	lastPos: Types.Vec3,
-	--- Last ground height this entity resolved, reused on frames where the
-	--- raycast budget did not reach it. docs/08: invisible at those distances.
-	groundY: number,
+	lastPos: Vector3,
+	phase: number,
 }
 
 local locomotion: { [number]: Locomotion } = {}
 local frameIndex = 0
-
-local raycastParams = RaycastParams.new()
-raycastParams.FilterType = Enum.RaycastFilterType.Exclude
-raycastParams.IgnoreWater = true
 
 --- Per-frame profiling, surfaced through getStats() and sampled into
 --- perf.tick telemetry so the client numbers land beside the server ones.
@@ -152,26 +111,6 @@ local profile = {
 	samples = 0,
 	tiers = { full = 0, reduced = 0, clip = 0, culled = 0 },
 }
-
-local function groundAtFactory(entityId: number, mayCast: boolean): (Types.Vec3) -> Types.Vec3
-	return function(desired: Types.Vec3): Types.Vec3
-		local loco = locomotion[entityId]
-		if not mayCast or profile.raycastsThisFrame >= Lod.RAYCAST_BUDGET then
-			-- Budget exhausted or this entity was not granted one: reuse the
-			-- last known plane rather than skipping the step entirely, which
-			-- would freeze the gait instead of merely dating it.
-			return Types.vec3(desired.x, if loco then loco.groundY else desired.y, desired.z)
-		end
-		profile.raycastsThisFrame += 1
-		local origin = Vector3.new(desired.x, desired.y + 6, desired.z)
-		local result = workspace:Raycast(origin, Vector3.new(0, -24, 0), raycastParams)
-		local y = if result then result.Position.Y else (if loco then loco.groundY else desired.y)
-		if loco then
-			loco.groundY = y
-		end
-		return Types.vec3(desired.x, y, desired.z)
-	end
-end
 
 local function container(): Folder
 	if folder then
@@ -194,6 +133,7 @@ local function release(id: number)
 	-- recycled id inherit the previous occupant's health and flash on spawn.
 	visuals[id] = nil
 	locomotion[id] = nil
+	animScale[id] = nil
 	EntityRig.release(rig)
 end
 
@@ -292,6 +232,8 @@ local function render(dt: number)
 
 	local camera = workspace.CurrentCamera
 	local eye = if camera then camera.CFrame.Position else Vector3.zero
+	local character = Players.LocalPlayer.Character
+	local localRoot = character and character:FindFirstChild("HumanoidRootPart") :: BasePart?
 
 	debug.profilebegin("deepcache/interpolate")
 	local interpStart = os.clock()
@@ -316,11 +258,9 @@ local function render(dt: number)
 			rig.model.Name = `Entity_{id}`
 			active[id] = rig
 			visuals[id] = { lastHp = sample.hpPct, flashUntil = 0, deathAt = 0 }
-			local profileFor = GAIT[sample.kind] or GAIT.Skitter
 			locomotion[id] = {
-				gait = StepPlanner.new(profileFor.offsets, profileFor.groups, profileFor.reach),
-				lastPos = Types.vec3(sample.pos.x, sample.pos.y, sample.pos.z),
-				groundY = sample.pos.y,
+				lastPos = Vector3.new(sample.pos.x, sample.pos.y, sample.pos.z),
+				phase = 0,
 			}
 		end
 
@@ -338,6 +278,7 @@ local function render(dt: number)
 		end
 
 		local scale, transparency = 1, 0
+
 
 		if sample.state == "death" then
 			-- Corpses collapse and fade over their lifetime rather than
@@ -369,8 +310,8 @@ local function render(dt: number)
 				colour = colour:Lerp(WOUNDED_COLOR, (1 - sample.hpPct) * 0.6)
 			end
 		end
+		animScale[id] = scale
 		EntityRig.setLook(rig, colour, material, transparency)
-		EntityRig.setBody(rig, Vector3.new(sample.pos.x, sample.pos.y, sample.pos.z), sample.yaw, scale)
 
 		table.insert(candidates, {
 			id = id,
@@ -380,87 +321,43 @@ local function render(dt: number)
 	profile.interpolationMs = (os.clock() - interpStart) * 1000
 	debug.profileend()
 
-	-- Allocate the frame's raycasts before any gait runs, so the budget is a
-	-- decision made once with the whole population in view rather than a
-	-- first-come-first-served race between entities.
-	local granted = Lod.allocateRaycasts(candidates)
+	-- The R6 rig plants feet by pose rather than by ground probe, so the
+	-- 24-ray frame budget that `Lod.allocateRaycasts` exists to divide is
+	-- currently unspent. The census still drives which tiers are drawn.
 	profile.tiers = Lod.census(candidates)
 
 	debug.profilebegin("deepcache/animation")
 	local animStart = os.clock()
 	for _, candidate in candidates do
 		local id = candidate.id
-		local loco = locomotion[id]
-		local sample = samples[id]
-		if loco == nil or sample == nil then
-			continue
-		end
-		local tier = Lod.tierFor(candidate.distance)
-		if not Lod.shouldStepGait(tier, frameIndex) then
-			continue
-		end
-
-		local bodyPos = Types.vec3(sample.pos.x, sample.pos.y, sample.pos.z)
-		local velocity = Types.scaleVec3(Types.subVec3(bodyPos, loco.lastPos), if dt > 0 then 1 / dt else 0)
-		loco.lastPos = bodyPos
-
-		-- Only the `full` tier is eligible for a ray at all, and even then only
-		-- if the allocator granted it one this frame.
-		local mayCast = tier == "full" and granted[id] == true
-		StepPlanner.step(loco.gait, bodyPos, velocity, dt, groundAtFactory(id, mayCast))
-
-		-- IK runs only at the full tier: at 40+ studs the joint position is
-		-- sub-pixel and solving it is pure cost. Beyond `reduced` the legs are
-		-- hidden outright, so there is nothing for a solution to drive.
 		local rig = active[id]
-		if rig == nil then
+		local sample = samples[id]
+		local loco = locomotion[id]
+		if rig == nil or sample == nil or loco == nil then
 			continue
 		end
-		local showLegs = tier == "full" or tier == "reduced"
-		EntityRig.setLegsVisible(rig, showLegs)
 
-		if showLegs then
-			local spec = rig.spec
-			-- Hips rotate with the body; the planner works in world space, so
-			-- the rest offset has to be rotated to match before it is a hip.
-			local yawCf = CFrame.Angles(0, sample.yaw, 0)
-			local bodyVec = Vector3.new(bodyPos.x, bodyPos.y, bodyPos.z)
-			for index, leg in loco.gait.legs do
-				local limb = rig.limbs[index]
-				if limb == nil then
-					continue
-				end
-				local footV = StepPlanner.footPosition(leg)
-				local foot = Vector3.new(footV.x, footV.y, footV.z)
-				local rotated = yawCf:VectorToWorldSpace(
-					Vector3.new(leg.restOffset.x, leg.restOffset.y, leg.restOffset.z)
-				)
-				-- Hip sits at the body, not at the resting foot height: the Y
-				-- of a rest offset is where the *foot* rests, and using it for
-				-- the hip would sink every joint into the floor.
-				local hip = bodyVec + Vector3.new(rotated.X, spec.bodyOffsetY * 0.4, rotated.Z)
-				local knee: Vector3
-				if tier == "full" then
-					local pole = yawCf:VectorToWorldSpace(POLE_LOCAL)
-					local kneeV = TwoBoneIk.solve(
-						Types.vec3(hip.X, hip.Y, hip.Z),
-						Types.vec3(foot.X, foot.Y, foot.Z),
-						spec.upperLength,
-						spec.lowerLength,
-						Types.vec3(pole.X, pole.Y, pole.Z)
-					)
-					knee = Vector3.new(kneeV.x, kneeV.y, kneeV.z)
-				else
-					-- `reduced`: straight-line pose, no law of cosines. At 40+
-					-- studs the bend is sub-pixel, but the limbs still have to
-					-- be *placed* -- an entity that never reached `full` would
-					-- otherwise keep the CFrame it was built with and stretch
-					-- its legs to the world origin.
-					knee = hip:Lerp(foot, 0.5)
-				end
-				EntityRig.placeLimb(limb, hip, knee, foot)
-			end
+		local tier = Lod.tierFor(candidate.distance)
+		local bodyVec = Vector3.new(sample.pos.x, sample.pos.y, sample.pos.z)
+
+		-- Walk phase advances with distance travelled, not with wall time, so
+		-- a slow kind takes slow strides instead of the same cycle at a lower
+		-- amplitude. Standing still holds the pose rather than marching.
+		local moved = (bodyVec - loco.lastPos).Magnitude
+		loco.lastPos = bodyVec
+		local speed = if dt > 0 then moved / dt else 0
+		loco.phase = (loco.phase + moved * RigsConfig.WALK.radiansPerStud) % (math.pi * 2)
+		local stride = math.clamp(speed / RigsConfig.WALK.fullStrideSpeed, 0, 1)
+
+		-- The head tracks whoever it is attacking. Cheapest possible "it has
+		-- noticed you", and the strongest signal the renderer can send.
+		local lookAt: Vector3? = nil
+		if sample.state == "attack" and localRoot ~= nil then
+			lookAt = localRoot.Position
 		end
+
+		EntityRig.setLimbsVisible(rig, tier ~= "culled")
+		EntityRig.pose(rig, bodyVec, sample.yaw, animScale[id] or 1, loco.phase, stride, lookAt)
 	end
 	profile.animationMs = (os.clock() - animStart) * 1000
 	debug.profileend()
@@ -487,21 +384,6 @@ function EntityRenderer.start()
 
 	-- RenderStepped, not Heartbeat: interpolation should produce a fresh
 	-- position for the frame actually being drawn.
-	-- Ground rays must not hit the entities themselves, or every leg resolves
-	-- to the top of its own body part and the gait plants feet in mid-air.
-	-- Ragdolls are excluded for the same reason: a corpse under a walking
-	-- entity would raise its feet onto the body.
-	local excluded: { Instance } = { container() }
-	local ragdolls = workspace:FindFirstChild("DeepcacheRagdolls")
-	if ragdolls then
-		table.insert(excluded, ragdolls)
-	end
-	local character = Players.LocalPlayer.Character
-	if character then
-		table.insert(excluded, character)
-	end
-	raycastParams.FilterDescendantsInstances = excluded
-
 	connection = RunService.RenderStepped:Connect(render)
 
 	-- M7-10 needs the RUNNING renderer's profile, and require() from the

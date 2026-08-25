@@ -1,6 +1,52 @@
 # 14 — Humanoid rigs
 
-**Status:** planned, not started. Supersedes the box-with-legs rig in
+**Status:** implemented, but *not* the way this document originally planned.
+Read §0 first — the rest is kept for the reasoning, not as instructions.
+
+---
+
+## 0. What was actually built, and why the plan below is wrong
+
+The plan called for a humanoid built from **two-segment IK limbs** (§2's
+15-part skeleton, §4's "legs — existing StepPlanner + TwoBoneIk, unchanged").
+That was implemented and it looked worse, not better.
+
+The reason is structural and simple: **Roblox's own R6 character has rigid
+limbs that pivot at a joint.** An arm is one part rotating at the shoulder; a
+leg is one part rotating at the hip. Neither bends in the middle. An IK rig
+places limb parts *between two solved endpoints* with `CFrame.lookAt`, so
+limbs slide and stretch to reach wherever the gait put a foot rather than
+rotating about anything — reported as "the legs move so weird", and exactly
+right.
+
+Shipped instead: a six-part R6 skeleton (torso, head, two arms, two legs),
+limbs rigid, posed by rotating each about its joint, with a contralateral walk
+cycle whose phase advances with **distance travelled** rather than wall time —
+so a slow kind takes slow strides instead of the same cycle at lower
+amplitude.
+
+Consequences, stated plainly:
+
+- **`core/anim/TwoBoneIk` and `core/anim/StepPlanner` no longer drive
+  rendering.** Both remain correct and tested (M7-1, M7-2); they are simply
+  the wrong tool for a skeleton with no knee. This undoes the *rendering* half
+  of M7-3.
+- **The 24-raycast frame budget is unspent.** Feet are placed by pose, not by
+  ground probe, so `Lod.allocateRaycasts` currently allocates nothing.
+  Entities no longer conform to uneven ground.
+- **Animation cost fell from 1.494 ms to ~0.11 ms.** The IK, the per-leg
+  raycasts and the eight-to-fourteen-part rigs are all gone.
+
+Measured after the change: 6/6 rigs rendered, six parts each, heights 4.4-8.5
+studs, feet planted on the spawn plane, leg swing **71 degrees** — exactly
+twice the configured 0.62 rad amplitude, both legs equal and opposite.
+
+The §1 finding below still stands and is why the IK version failed twice; it
+just turned out to be unfixable within an IK rig rather than a tuning problem.
+
+---
+
+**Original plan follows.** Superseded. Supersedes the box-with-legs rig in
 `config/Rigs.luau` / `client/EntityRig.luau` (commits `22fd807`, `870a534`).
 
 The current rig is a body box with two-segment legs. It reads as an insect,

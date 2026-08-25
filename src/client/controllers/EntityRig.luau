@@ -1,42 +1,111 @@
 --!strict
---[[ Pooled multi-part enemy bodies, driven by the gait and IK solutions.
+--[[ Pooled R6-shaped enemy bodies — the same silhouette as the player.
 
-	`core/anim/StepPlanner` and `core/anim/TwoBoneIk` have produced foot and
-	knee positions every frame since M7-1, and until now nothing consumed them:
-	every entity rendered as one box, so the animation work was real, budgeted,
-	profiled — and invisible. This is the geometry it moves.
+	**Limbs are rigid and swing from fixed joints.** That is how Roblox's own
+	R6 character works: an arm is one part pivoting at the shoulder, a leg is
+	one part pivoting at the hip, and neither bends in the middle. Matching it
+	is what makes an enemy read as the same kind of thing the player is.
 
-	Rigs are pooled per kind rather than globally. A Reclaimer has six legs and
-	a Lancer two, so a shared pool would mean rebuilding limbs on almost every
-	acquire; keyed by kind, a recycled rig already has the right skeleton and
-	only needs recolouring.
+	This replaces an IK-solved two-segment rig. That version placed each limb
+	part with `CFrame.lookAt` between solved joint positions, so limbs slid and
+	stretched to reach wherever the gait had put a foot instead of rotating
+	about a joint — reported as "the legs move so weird", and correctly so:
+	nothing about it was pivoting.
 
-	Everything is `Anchored` and `CanQuery = false`. Legs that participated in
-	raycasts would be hit by the gait's own ground probes, and each foot would
-	resolve to the top of the leg above it.
+	Consequences worth being explicit about:
+	  - `core/anim/TwoBoneIk` and `core/anim/StepPlanner` no longer drive
+	    rendering. Both remain tested and correct; they are simply the wrong
+	    tool for an R6 skeleton, which has no knee to solve. See docs/14.
+	  - No ground raycasts per leg, so the 24-ray frame budget is unused by
+	    animation now.
+	  - Six parts per entity instead of ten to fourteen.
+
+	Everything is `Anchored` and `CanQuery = false`. Limbs that answered
+	raycasts would be hit by the combat wall-check on their own body.
 ]]
 
 local RigsConfig = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared").config.Rigs)
 
 local EntityRig = {}
 
-export type Limb = { upper: BasePart, lower: BasePart }
+--- R6 proportions, in studs, for a 5-stud-tall reference character. Scaled per
+--- kind by `height`. These are Roblox's own defaults: torso 2x2x1, limbs 1x2x1,
+--- head 1x1x1 at 1.25 scale.
+local REF_HEIGHT = 5
+
+export type Spec = {
+	height: number,
+	scale: number,
+	torsoSize: Vector3,
+	headSize: Vector3,
+	limbSize: Vector3,
+	--- Joint pivots in torso-local space.
+	shoulderY: number,
+	shoulderX: number,
+	hipY: number,
+	hipX: number,
+	neckY: number,
+	--- Height of the torso centre above the entity's ground position.
+	torsoCentreY: number,
+	hunch: number,
+	static: boolean,
+}
 
 export type Rig = {
 	kind: string,
 	model: Model,
-	body: BasePart,
-	limbs: { Limb },
-	--- Cached so the driver does not re-read config every frame.
-	spec: any,
-	legsVisible: boolean,
+	torso: BasePart,
+	head: BasePart,
+	arms: { BasePart },
+	legs: { BasePart },
+	spec: Spec,
+	limbsVisible: boolean,
 }
 
 local pools: { [string]: { Rig } } = {}
+local specs: { [string]: Spec } = {}
 
-local function v3(t: any): Vector3
-	return Vector3.new(t.x, t.y, t.z)
+--------------------------------------------------------------------------------
+
+local function buildSpec(kind: string): Spec
+	local entry = (RigsConfig.kinds :: any)[kind] or (RigsConfig.kinds :: any).Skitter
+	local scale = entry.height / REF_HEIGHT
+	local build = entry.build
+
+	-- Width scales with `build` but height does not: a Hauler is broad, not
+	-- stretched, and scaling both would just make a bigger Skitter.
+	local torsoSize = Vector3.new(2 * scale * build, 2 * scale, 1 * scale * build)
+	local limbSize = Vector3.new(1 * scale * build, 2 * scale, 1 * scale * build)
+	local headSize = Vector3.new(1.25 * scale * build, 1.25 * scale, 1.25 * scale * build)
+
+	return {
+		height = entry.height,
+		scale = scale,
+		torsoSize = torsoSize,
+		headSize = headSize,
+		limbSize = limbSize,
+		shoulderY = torsoSize.Y * 0.5 - limbSize.Y * 0.125,
+		shoulderX = torsoSize.X * 0.5 + limbSize.X * 0.5,
+		hipY = -torsoSize.Y * 0.5,
+		hipX = limbSize.X * 0.5,
+		neckY = torsoSize.Y * 0.5 + headSize.Y * 0.5,
+		-- Feet at ground level: legs hang a full limb-length below the hip.
+		torsoCentreY = limbSize.Y + torsoSize.Y * 0.5,
+		hunch = entry.hunch or 0,
+		static = entry.static == true,
+	}
 end
+
+function EntityRig.spec(kind: string): Spec
+	local cached = specs[kind]
+	if cached == nil then
+		cached = buildSpec(kind)
+		specs[kind] = cached
+	end
+	return cached
+end
+
+--------------------------------------------------------------------------------
 
 local function makePart(name: string, parent: Instance): Part
 	local part = Instance.new("Part")
@@ -52,28 +121,40 @@ local function makePart(name: string, parent: Instance): Part
 	return part
 end
 
---- Build a rig for `kind`. Falls back to the Skitter plan for an unknown kind
---- rather than erroring: a roster addition should render as *something*.
 local function build(kind: string): Rig
-	local spec = (RigsConfig :: any)[kind] or (RigsConfig :: any).Skitter
-
+	local spec = EntityRig.spec(kind)
 	local model = Instance.new("Model")
 	model.Name = `Rig_{kind}`
 
-	local body = makePart("Body", model)
-	body.Size = v3(spec.bodySize)
-	model.PrimaryPart = body
+	local torso = makePart("Torso", model)
+	torso.Size = spec.torsoSize
+	model.PrimaryPart = torso
 
-	local limbs: { Limb } = {}
-	for index in spec.legs do
-		local upper = makePart(`Leg{index}Upper`, model)
-		upper.Size = Vector3.new(spec.legThickness, spec.legThickness, spec.upperLength)
-		local lower = makePart(`Leg{index}Lower`, model)
-		lower.Size = Vector3.new(spec.legThickness * 0.82, spec.legThickness * 0.82, spec.lowerLength)
-		table.insert(limbs, { upper = upper, lower = lower })
+	local head = makePart("Head", model)
+	head.Size = spec.headSize
+
+	local arms: { BasePart } = {}
+	local legs: { BasePart } = {}
+	for index = 1, 2 do
+		local arm = makePart(if index == 1 then "LeftArm" else "RightArm", model)
+		arm.Size = spec.limbSize
+		arms[index] = arm
+
+		local leg = makePart(if index == 1 then "LeftLeg" else "RightLeg", model)
+		leg.Size = spec.limbSize
+		legs[index] = leg
 	end
 
-	return { kind = kind, model = model, body = body, limbs = limbs, spec = spec, legsVisible = true }
+	return {
+		kind = kind,
+		model = model,
+		torso = torso,
+		head = head,
+		arms = arms,
+		legs = legs,
+		spec = spec,
+		limbsVisible = true,
+	}
 end
 
 function EntityRig.acquire(kind: string, parent: Instance): Rig
@@ -85,13 +166,6 @@ function EntityRig.acquire(kind: string, parent: Instance): Rig
 	end
 	local rig = build(kind)
 	rig.model.Parent = parent
-	-- A freshly built rig has never been placed, so its limbs sit at the world
-	-- origin until the first frame that solves them. Collapse them onto the
-	-- body up front so there is no frame where that is visible.
-	for _, limb in rig.limbs do
-		limb.upper.CFrame = rig.body.CFrame
-		limb.lower.CFrame = rig.body.CFrame
-	end
 	return rig
 end
 
@@ -106,72 +180,103 @@ function EntityRig.release(rig: Rig)
 end
 
 function EntityRig.setLook(rig: Rig, colour: Color3, material: Enum.Material, transparency: number)
-	rig.body.Color = colour
-	rig.body.Material = material
-	rig.body.Transparency = transparency
-	-- Limbs sit a shade darker so the silhouette reads as a body with legs
-	-- rather than one solid mass of colour.
-	local limbColour = colour:Lerp(Color3.new(0, 0, 0), 0.35)
-	for _, limb in rig.limbs do
-		limb.upper.Color = limbColour
-		limb.lower.Color = limbColour
-		limb.upper.Material = material
-		limb.lower.Material = material
-		limb.upper.Transparency = transparency
-		limb.lower.Transparency = transparency
-	end
-end
+	rig.torso.Color = colour
+	rig.torso.Material = material
+	rig.torso.Transparency = transparency
 
---- Hide limbs without destroying them. At `clip` and beyond a leg is a couple
---- of pixels and solving it is pure cost, but rebuilding the rig when the
---- entity comes back would churn Instances every time a player turns around.
-function EntityRig.setLegsVisible(rig: Rig, visible: boolean)
-	if rig.legsVisible == visible then
-		return
-	end
-	rig.legsVisible = visible
-	for _, limb in rig.limbs do
-		limb.upper.LocalTransparencyModifier = if visible then 0 else 1
-		limb.lower.LocalTransparencyModifier = if visible then 0 else 1
-		if not visible then
-			-- Park on the body rather than leaving them wherever they last
-			-- were. A hidden limb is never placed, so a rig that goes out of
-			-- view and comes back would otherwise be shown for one frame with
-			-- its legs still at their old position -- and a rig that was built
-			-- but never placed at all has them at the world origin, stretching
-			-- a limb across the map the instant it becomes visible.
-			limb.upper.CFrame = rig.body.CFrame
-			limb.lower.CFrame = rig.body.CFrame
+	-- The head is brighter than the body so it catches the eye, which is what
+	-- makes "it is looking at me" land at a distance.
+	rig.head.Color = colour:Lerp(Color3.new(1, 1, 1), 0.3)
+	rig.head.Material = material
+	rig.head.Transparency = transparency
+
+	local limbColour = colour:Lerp(Color3.new(0, 0, 0), 0.28)
+	for _, set in { rig.arms, rig.legs } do
+		for _, part in set do
+			part.Color = limbColour
+			part.Material = material
+			part.Transparency = transparency
 		end
 	end
 end
 
---- Place one limb so it spans `from` -> `joint` -> `to`.
-local function placeLimb(limb: Limb, from: Vector3, joint: Vector3, to: Vector3)
-	local upperVec = joint - from
-	local upperLen = upperVec.Magnitude
-	if upperLen > 1e-3 then
-		limb.upper.Size = Vector3.new(limb.upper.Size.X, limb.upper.Size.Y, upperLen)
-		limb.upper.CFrame = CFrame.lookAt(from, joint) * CFrame.new(0, 0, -upperLen / 2)
+function EntityRig.setLimbsVisible(rig: Rig, visible: boolean)
+	if rig.limbsVisible == visible then
+		return
 	end
-
-	local lowerVec = to - joint
-	local lowerLen = lowerVec.Magnitude
-	if lowerLen > 1e-3 then
-		limb.lower.Size = Vector3.new(limb.lower.Size.X, limb.lower.Size.Y, lowerLen)
-		limb.lower.CFrame = CFrame.lookAt(joint, to) * CFrame.new(0, 0, -lowerLen / 2)
+	rig.limbsVisible = visible
+	local modifier = if visible then 0 else 1
+	for _, set in { rig.arms, rig.legs } do
+		for _, part in set do
+			part.LocalTransparencyModifier = modifier
+		end
 	end
 end
 
-EntityRig.placeLimb = placeLimb
+--- Place a limb hanging from `pivot`, swung `angle` radians about the joint's
+--- X axis. This is the whole difference from the previous rig: the part
+--- rotates *about the joint* and its centre follows, rather than being
+--- stretched between two solved endpoints.
+local function placeLimb(part: BasePart, pivotCf: CFrame, angle: number, length: number)
+	local swung = pivotCf * CFrame.Angles(angle, 0, 0)
+	part.CFrame = swung * CFrame.new(0, -length * 0.5, 0)
+end
 
---- Body transform. Legs are placed separately by the caller, which owns the
---- gait state and decides whether the IK ran this frame.
-function EntityRig.setBody(rig: Rig, position: Vector3, yaw: number, scale: number)
+--- Position the whole rig. `position` is the entity's ground point.
+---
+--- `phase` drives the walk cycle; `stride` is 0 when standing still and 1 at
+--- full speed, so a stationary entity holds a neutral pose instead of marching
+--- on the spot.
+function EntityRig.pose(
+	rig: Rig,
+	position: Vector3,
+	yaw: number,
+	scale: number,
+	phase: number,
+	stride: number,
+	lookAt: Vector3?
+)
 	local spec = rig.spec
-	rig.body.Size = v3(spec.bodySize) * scale
-	rig.body.CFrame = CFrame.new(position + Vector3.new(0, spec.bodyOffsetY * scale, 0))
+	local s = scale
+
+	rig.torso.Size = spec.torsoSize * s
+	rig.head.Size = spec.headSize * s
+	for _, set in { rig.arms, rig.legs } do
+		for _, part in set do
+			part.Size = spec.limbSize * s
+		end
+	end
+
+	local torsoCf = CFrame.new(position + Vector3.new(0, spec.torsoCentreY * s, 0))
 		* CFrame.Angles(0, yaw, 0)
+		* CFrame.Angles(spec.hunch, 0, 0)
+	rig.torso.CFrame = torsoCf
+
+	local headCf = torsoCf * CFrame.new(0, spec.neckY * s, 0)
+	if lookAt ~= nil then
+		-- Yaw only. A head that pitches at its target looks broken the moment
+		-- the target is directly below it.
+		local flat = Vector3.new(lookAt.X, headCf.Position.Y, lookAt.Z)
+		if (flat - headCf.Position).Magnitude > 1e-3 then
+			rig.head.CFrame = CFrame.lookAt(headCf.Position, flat)
+		else
+			rig.head.CFrame = headCf
+		end
+	else
+		rig.head.CFrame = headCf
+	end
+
+	-- Classic contralateral gait: left arm forward with right leg. A static
+	-- kind holds its arms at rest and never swings.
+	local swing = if spec.static then 0 else math.sin(phase) * stride
+	local legSwing = swing * RigsConfig.WALK.legSwing
+	local armSwing = swing * RigsConfig.WALK.armSwing
+	local length = spec.limbSize.Y * s
+
+	placeLimb(rig.legs[1], torsoCf * CFrame.new(-spec.hipX * s, spec.hipY * s, 0), legSwing, length)
+	placeLimb(rig.legs[2], torsoCf * CFrame.new(spec.hipX * s, spec.hipY * s, 0), -legSwing, length)
+	placeLimb(rig.arms[1], torsoCf * CFrame.new(-spec.shoulderX * s, spec.shoulderY * s, 0), -armSwing, length)
+	placeLimb(rig.arms[2], torsoCf * CFrame.new(spec.shoulderX * s, spec.shoulderY * s, 0), armSwing, length)
 end
 
 function EntityRig.pooledCount(): number
