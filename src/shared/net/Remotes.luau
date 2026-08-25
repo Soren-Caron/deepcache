@@ -40,6 +40,15 @@ local DECLARATIONS: { [string]: RemoteKind } = {
 	--- Server -> client. Corrects a mispredicted ammo count.
 	AmmoSync = "Reliable",
 
+	--- Client -> server. Asks to reload a weapon. Reliable: a dropped reload
+	--- request leaves the player holding an empty magazine and pressing a key
+	--- that appears to do nothing.
+	ReloadRequest = "Reliable",
+
+	--- Server -> client. Reload started or finished, so the HUD can show a
+	--- timer rather than the player guessing when they can fire again.
+	ReloadState = "Reliable",
+
 	--- Server -> client. Position correction from the movement guard.
 	PositionCorrection = "Reliable",
 

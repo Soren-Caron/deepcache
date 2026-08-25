@@ -57,7 +57,14 @@ local hooks = {
 	onRemoveHitmarker = function() end,
 	onAmmoChanged = function(_weaponId: string, _ammo: number) end,
 	onWeaponChanged = function(_weaponId: string, _ammo: number) end,
+	onReloadStateChanged = function(_weaponId: string, _reloading: boolean, _seconds: number) end,
 }
+
+--- Set while the server has a reload in flight for the held weapon. Firing is
+--- refused server-side during it anyway; tracking it here stops the client
+--- sending requests it knows will be rejected, and stops the auto-reload below
+--- firing a second request every frame.
+local reloading: { [string]: boolean } = {}
 
 --- Number-key bindings, in the order docs/01 lists the weapon table.
 local SLOT_KEYS: { [Enum.KeyCode]: string } = {
@@ -80,6 +87,22 @@ function PredictionController.setWeapon(weaponId: string)
 		return
 	end
 	currentWeapon = weaponId
+end
+
+--- Ask the server to reload the held weapon. The server owns the timer and the
+--- magazine; this only sends the request and lets `ReloadState` come back.
+function PredictionController.requestReload()
+	local weapon = (WeaponsConfig :: any)[currentWeapon]
+	if weapon == nil or weapon.magazine == nil then
+		return
+	end
+	if reloading[currentWeapon] then
+		return
+	end
+	if (ammo[currentWeapon] or 0) >= weapon.magazine then
+		return
+	end
+	Remotes.event("ReloadRequest"):FireServer(currentWeapon)
 end
 
 local function percentile(values: { number }, fraction: number): number
@@ -125,11 +148,19 @@ local function fire()
 		return
 	end
 
+	if reloading[currentWeapon] then
+		return
+	end
+
 	local remaining = ammo[currentWeapon]
 	if remaining == nil then
 		remaining = weapon.magazine
 	end
 	if remaining <= 0 then
+		-- Auto-reload on empty. Without it the weapon simply stops working and
+		-- nothing on screen explains why -- which is exactly how it behaved
+		-- before reloading existed at all.
+		PredictionController.requestReload()
 		return
 	end
 
@@ -235,6 +266,17 @@ function PredictionController.start()
 
 	Remotes.event("FireResult").OnClientEvent:Connect(onFireResult)
 	Remotes.event("AmmoSync").OnClientEvent:Connect(onAmmoSync)
+	Remotes.event("ReloadState").OnClientEvent:Connect(function(payload)
+		if typeof(payload) ~= "table" or typeof(payload.weaponId) ~= "string" then
+			return
+		end
+		reloading[payload.weaponId] = payload.reloading == true
+		hooks.onReloadStateChanged(
+			payload.weaponId,
+			payload.reloading == true,
+			tonumber(payload.seconds) or 0
+		)
+	end)
 
 	UserInputService.InputBegan:Connect(function(input, processed)
 		if processed then
@@ -250,6 +292,11 @@ function PredictionController.start()
 		-- it, so a real session could only ever fire the Sidearm. With 88 dps
 		-- that made a Warden (700 HP, 15.7 dps) and a Reclaimer (550 HP, 26
 		-- dps) unwinnable solo -- they out-damage the time needed to kill them.
+		if input.KeyCode == Enum.KeyCode.R then
+			PredictionController.requestReload()
+			return
+		end
+
 		local slot = SLOT_KEYS[input.KeyCode]
 		if slot ~= nil then
 			PredictionController.setWeapon(slot)

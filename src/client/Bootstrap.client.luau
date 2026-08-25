@@ -42,6 +42,7 @@ local function main()
 		-- The HUD is the only feedback that a weapon switch took effect.
 		onAmmoChanged = HudController.setAmmo,
 		onWeaponChanged = HudController.setWeapon,
+		onReloadStateChanged = HudController.setReloading,
 	})
 
 	PredictionController.start()

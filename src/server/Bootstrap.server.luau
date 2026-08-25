@@ -1195,6 +1195,83 @@ local function main()
 		return rows
 	end)
 
+	-- Reload acceptance: empty a magazine, reload it, and confirm firing is
+	-- refused for the whole window and permitted after. Registered here rather
+	-- than driven from the command bar, which gets a fresh idle CombatService.
+	Diagnostics.register("reloadProbe", function(weaponId: string?)
+		local player = Players:GetPlayers()[1]
+		if player == nil then
+			return { error = "no player connected" }
+		end
+		local id = weaponId or "Sidearm"
+		local weapon = (require(Shared.config.Weapons) :: any)[id]
+		if weapon == nil or weapon.magazine == nil then
+			return { error = `{id} has no magazine` }
+		end
+
+		local rows: { string } = {}
+		local function fireOnce(): string
+			local before = CombatService.getMetrics()
+			CombatService.submit(player, {
+				seq = 0,
+				clientTime = TickService.now(),
+				origin = Vector3.new(0, 5, 0),
+				direction = Vector3.new(0, 0, 1),
+				weaponId = id,
+			})
+			task.wait(0.12)
+			local after = CombatService.getMetrics()
+			if after.rejectedReloading > before.rejectedReloading then
+				return "rejected:reloading"
+			elseif after.rejectedAmmo > before.rejectedAmmo then
+				return "rejected:ammo"
+			elseif after.rejectedRate > before.rejectedRate then
+				return "rejected:rate"
+			end
+			return "accepted"
+		end
+
+		CombatService.reload(player, id)
+		task.wait(0.15)
+
+		-- Drain the magazine. Rate limiting means this needs spacing.
+		local interval = 1 / (weapon.rps or 4) + 0.03
+		for _ = 1, weapon.magazine do
+			CombatService.submit(player, {
+				seq = 0,
+				clientTime = TickService.now(),
+				origin = Vector3.new(0, 5, 0),
+				direction = Vector3.new(0, 0, 1),
+				weaponId = id,
+			})
+			task.wait(interval)
+		end
+		rows[#rows + 1] = `after draining {weapon.magazine} rounds, firing -> {fireOnce()}`
+
+		local started, reason = CombatService.requestReload(player, id)
+		rows[#rows + 1] = `requestReload -> {tostring(started)} {tostring(reason)}`
+
+		-- Mid-reload: must be refused.
+		task.wait(weapon.reloadSeconds * 0.4)
+		rows[#rows + 1] = `firing mid-reload ({string.format("%.1f", weapon.reloadSeconds * 0.4)}s in) -> {fireOnce()}`
+
+		-- A second request while one is in flight must not restart the timer.
+		local again, againReason = CombatService.requestReload(player, id)
+		rows[#rows + 1] = `requestReload again mid-reload -> {tostring(again)} {tostring(againReason)}`
+
+		-- Wait out the remainder.
+		task.wait(weapon.reloadSeconds)
+		rows[#rows + 1] = `firing after the reload window -> {fireOnce()}`
+
+		-- Reloading a full magazine is a no-op, not a lockout.
+		CombatService.reload(player, id)
+		task.wait(0.1)
+		local fullOk, fullReason = CombatService.requestReload(player, id)
+		rows[#rows + 1] = `requestReload on a full magazine -> {tostring(fullOk)} {tostring(fullReason)}`
+
+		return { weapon = id, reloadSeconds = weapon.reloadSeconds, steps = rows, metrics = CombatService.getMetrics() }
+	end)
+
 	Diagnostics.register("movementMetrics", MovementGuardService.getMetrics)
 	Diagnostics.register("bandwidth", ReplicationService.sampleBandwidth)
 	Diagnostics.register("bench", TickBench.run)

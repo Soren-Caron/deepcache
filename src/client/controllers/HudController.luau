@@ -85,6 +85,10 @@ local hurtVignette: Frame
 local currentWeapon = "Sidearm"
 local currentAmmo = 0
 
+local reloadingWeapon: string? = nil
+local reloadEndsAt = 0
+local reloadSeconds = 0
+
 local hitmarkerUntil = 0
 local hurtUntil = 0
 local lastHealth = -1
@@ -215,8 +219,14 @@ local function render()
 	-- Weapon rides on the vitals line rather than getting its own: switching is
 	-- new (number keys 1-4) and a player who cannot see which weapon is live
 	-- has no way to tell the switch worked.
-	vitalsLabel.Text = string.format("HP %3d   %s %d", hp, currentWeapon, currentAmmo)
-	vitalsLabel.TextColor3 = if hp <= 25 then ALERT else DIM
+	if reloadingWeapon == currentWeapon and reloadSeconds > 0 then
+		local left = math.max(reloadEndsAt - os.clock(), 0)
+		vitalsLabel.Text = string.format("HP %3d   %s RELOADING %.1fs", hp, currentWeapon, left)
+		vitalsLabel.TextColor3 = ACCENT
+	else
+		vitalsLabel.Text = string.format("HP %3d   %s %d", hp, currentWeapon, currentAmmo)
+		vitalsLabel.TextColor3 = if hp <= 25 then ALERT elseif currentAmmo == 0 then ALERT else DIM
+	end
 
 	local now = os.clock()
 
@@ -273,6 +283,19 @@ end
 function HudController.setAmmo(weaponId: string, ammo: number)
 	if weaponId == currentWeapon then
 		currentAmmo = ammo
+	end
+end
+
+--- Pushed by PredictionController when the server starts or finishes a reload.
+--- Without a readout the weapon simply stops firing for 1.4 seconds and
+--- nothing on screen says why, which is indistinguishable from it being broken.
+function HudController.setReloading(weaponId: string, reloading: boolean, seconds: number)
+	if reloading then
+		reloadingWeapon = weaponId
+		reloadSeconds = seconds
+		reloadEndsAt = os.clock() + seconds
+	elseif reloadingWeapon == weaponId then
+		reloadingWeapon = nil
 	end
 end
 
