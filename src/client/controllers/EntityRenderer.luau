@@ -21,6 +21,7 @@ local Interpolator = require(Shared.core.net.Interpolator)
 local Snapshot = require(Shared.core.net.Snapshot)
 local Types = require(Shared.core.Types)
 local Remotes = require(Shared.net.Remotes)
+local EnemiesConfig = require(Shared.config.Enemies)
 local Lod = require(Shared.core.anim.Lod)
 local RigsConfig = require(Shared.config.Rigs)
 local EntityRig = require("./EntityRig")
@@ -46,6 +47,14 @@ local KIND_MATERIAL: { [string]: Enum.Material } = {
 	Warden = Enum.Material.Slate,
 	Reclaimer = Enum.Material.CorrodedMetal,
 }
+
+--- How far the server raises an entity's position above the floor. Mirrors
+--- `WaveService.grounded`, which lifts a spawn point by the kind's hitbox
+--- radius so the hit-detection sphere rests tangent to the ground.
+local HITBOX_LIFT: { [string]: number } = {}
+for kind, config in EnemiesConfig :: any do
+	HITBOX_LIFT[kind] = config.hitboxRadius
+end
 
 local HIT_FLASH_SECONDS = 0.08
 local HIT_FLASH_COLOR = Color3.fromRGB(255, 250, 235)
@@ -94,6 +103,10 @@ local animScale: { [number]: number } = {}
 type Locomotion = {
 	lastPos: Vector3,
 	phase: number,
+	--- Low-passed speed. Raw per-frame speed jitters with interpolation, and
+	--- feeding that straight into the stride amplitude makes the swing pulse,
+	--- which reads as the body pumping rather than walking.
+	smoothSpeed: number,
 }
 
 local locomotion: { [number]: Locomotion } = {}
@@ -261,6 +274,7 @@ local function render(dt: number)
 			locomotion[id] = {
 				lastPos = Vector3.new(sample.pos.x, sample.pos.y, sample.pos.z),
 				phase = 0,
+				smoothSpeed = 0,
 			}
 		end
 
@@ -338,16 +352,26 @@ local function render(dt: number)
 		end
 
 		local tier = Lod.tierFor(candidate.distance)
+		local spec = rig.spec
 		local bodyVec = Vector3.new(sample.pos.x, sample.pos.y, sample.pos.z)
 
-		-- Walk phase advances with distance travelled, not with wall time, so
-		-- a slow kind takes slow strides instead of the same cycle at a lower
-		-- amplitude. Standing still holds the pose rather than marching.
+		-- The server's position is a hitbox centre, raised off the floor by the
+		-- kind's `hitboxRadius`. The rig poses from the *ground*, so that lift
+		-- has to come back off or every enemy stands in mid-air -- measured at
+		-- 3.02 studs of float against a floor at y=0.
+		local groundVec = bodyVec - Vector3.new(0, HITBOX_LIFT[sample.kind] or 0, 0)
+
+		-- Walk phase advances with distance travelled, not wall time, so a slow
+		-- kind takes slow strides rather than the same cycle at lower
+		-- amplitude. Standing still holds the pose instead of marching.
 		local moved = (bodyVec - loco.lastPos).Magnitude
 		loco.lastPos = bodyVec
+		loco.phase = (loco.phase + moved * spec.radiansPerStud) % (math.pi * 2)
+
 		local speed = if dt > 0 then moved / dt else 0
-		loco.phase = (loco.phase + moved * RigsConfig.WALK.radiansPerStud) % (math.pi * 2)
-		local stride = math.clamp(speed / RigsConfig.WALK.fullStrideSpeed, 0, 1)
+		local blend = if dt > 0 then math.clamp(dt / RigsConfig.WALK.strideSmoothing, 0, 1) else 1
+		loco.smoothSpeed += (speed - loco.smoothSpeed) * blend
+		local stride = math.clamp(loco.smoothSpeed / RigsConfig.WALK.fullStrideSpeed, 0, 1)
 
 		-- The head tracks whoever it is attacking. Cheapest possible "it has
 		-- noticed you", and the strongest signal the renderer can send.
@@ -357,7 +381,7 @@ local function render(dt: number)
 		end
 
 		EntityRig.setLimbsVisible(rig, tier ~= "culled")
-		EntityRig.pose(rig, bodyVec, sample.yaw, animScale[id] or 1, loco.phase, stride, lookAt)
+		EntityRig.pose(rig, groundVec, sample.yaw, animScale[id] or 1, loco.phase, stride, lookAt)
 	end
 	profile.animationMs = (os.clock() - animStart) * 1000
 	debug.profileend()

@@ -19,13 +19,23 @@ local Rigs = {}
 --- Walk cycle. Legs swing further than arms, which is what real gaits do and
 --- what stops the arms reading as flailing.
 Rigs.WALK = {
-	legSwing = 0.62,
-	armSwing = 0.45,
-	--- Radians of cycle per stud travelled. Tuned so a Skitter at 22 studs/s
-	--- takes strides rather than sprinting on the spot.
-	radiansPerStud = 0.55,
+	--- Peak swing from vertical, radians. 0.38 is about 22 degrees, which is
+	--- roughly a real walking stride. The first pass used 0.62 (35 degrees)
+	--- and read as a lurch rather than a walk.
+	legSwing = 0.38,
+	armSwing = 0.28,
 	--- Speed at which the stride reaches full amplitude.
 	fullStrideSpeed = 9,
+	--- Seconds for the stride amplitude to follow a change in speed. Without
+	--- smoothing, per-frame interpolation jitter makes the measured speed
+	--- fluctuate and the swing amplitude pulses with it, which reads as the
+	--- body pumping rather than walking.
+	strideSmoothing = 0.18,
+	--- Stride length is derived per kind from leg length rather than being a
+	--- single constant: `cycleStuds = strideFactor * legLength * sin(legSwing)`.
+	--- A fixed radians-per-stud makes a tall kind mince and a short kind skate,
+	--- because the distance one step covers scales with the leg taking it.
+	strideFactor = 4.0,
 }
 
 Rigs.kinds = {

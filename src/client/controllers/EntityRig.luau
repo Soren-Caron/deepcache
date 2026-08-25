@@ -49,6 +49,10 @@ export type Spec = {
 	torsoCentreY: number,
 	hunch: number,
 	static: boolean,
+	--- Radians of walk cycle per stud travelled, derived from this kind's leg
+	--- length. A single shared constant makes tall kinds mince and short kinds
+	--- skate, because the ground one step covers scales with the leg.
+	radiansPerStud: number,
 }
 
 export type Rig = {
@@ -93,6 +97,8 @@ local function buildSpec(kind: string): Spec
 		torsoCentreY = limbSize.Y + torsoSize.Y * 0.5,
 		hunch = entry.hunch or 0,
 		static = entry.static == true,
+		radiansPerStud = (math.pi * 2)
+			/ math.max(RigsConfig.WALK.strideFactor * limbSize.Y * math.sin(RigsConfig.WALK.legSwing), 0.1),
 	}
 end
 
