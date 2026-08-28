@@ -73,7 +73,62 @@ Two players see different ragdoll poses for the same death. That is correct and 
 
 ## The look pipeline
 
-Four layers, all within engine capability.
+Five layers, all within engine capability.
+
+### 0. Built geometry and practical light
+
+The spec used to start at post-processing, which assumed the level itself was
+already worth grading. It was not: `Assemble` produces sealed boxes — a floor,
+four walls, a doorway per connector — so every room was an open-topped pen with
+nothing in it, lit by the default afternoon sun through a missing ceiling. No
+amount of colour grading fixes an empty room.
+
+So the geometry pass now also builds:
+
+- **Ceilings**, which is what turns the level from a dollhouse into an
+  interior. They are queryable, unlike the rest of the decoration: a shot fired
+  at the ceiling should stop there.
+- **Ceiling fixtures** — an emissive panel plus a shadowless `PointLight`.
+  Mandatory, not optional: sealing a room removes the only light it had, so
+  `Decor.ceilingLights` is specified to always return at least one.
+- **Wall structure** — a band near the top and evenly spaced pilasters, which
+  is what stops a 24-stud wall reading as one flat slab.
+- **Props** against the walls, per zone: crates and containers on the
+  Perimeter, barrels and pipework in Processing, stacked storage in the Vault.
+
+Placement is pure (`core/level/Decor`) and the constraints are the interesting
+part, because each is a gameplay bug rather than an aesthetic one: nothing in
+the middle of a room (entities steer by seek-and-separate, not a navmesh, so an
+obstacle in open floor is something they wedge against), nothing within
+clearance of a doorway, and deterministic per seed so a replayed run looks like
+the run it replays.
+
+**Props are solid but transparent to raycasts** — `CanCollide = true` so set
+dressing does not read as a bug when you walk through it, `CanQuery = false` so
+combat is bit-for-bit unchanged. Real cover would be a better game and this is
+the obvious geometry for it, but it moves damage numbers and invalidates the
+difficulty pass, which makes it a design change rather than a presentation one.
+
+Two calibration facts worth keeping, both found by looking rather than
+reasoning:
+
+- **Light range is set by the room, brightness by the overlap.** Fixtures mount
+  at the 24-stud ceiling, so a range of 32 spends three quarters of itself
+  reaching the floor; a 112×96 Vault room lit by six of them rendered as pure
+  black with six glowing panels floating in it. Range then has to be sized for
+  the largest room, which means every fixture in a small one covers all of it —
+  so brightness has to come down to compensate, or a 56×56 entrance hall
+  saturates to white.
+- **Brightness belongs with the palette, not the fixture.** One global value
+  cannot serve both bands: what lit the Vault's near-black slate blew out the
+  Perimeter's pale concrete. How much light a room needs is a property of what
+  its surfaces are made of, so the multiplier lives in `Zones.palette`.
+
+Measured cost: 528 parts and 63 lights for a 16-module level, with lights on
+versus off differing by **0.004 ms of mean frame time** — the p95 jitter is
+identical either way, so the lights are free at this count. Server tick p95
+0.35 ms, 0 overruns; a Skitter pathed 166 studs through a dressed level with
+0 stalled samples.
 
 ### 1. Post-processing stack
 

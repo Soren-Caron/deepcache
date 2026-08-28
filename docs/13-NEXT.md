@@ -121,6 +121,14 @@ re-derives the bearing each frame. A stored angle keeps pointing at where the
 shooter was relative to where the player *used to be* facing, so turning
 toward the arrow swings it further away — worse than no arrow.
 
+**Props are not cover.** The level now has set dressing (see
+[docs/08 §0](08-PRESENTATION.md)), and it collides so you cannot walk through
+it — but `CanQuery = false`, so shots and enemy line-of-sight pass straight
+through and combat is bit-for-bit what it was before. Making props real cover
+is the obvious next step and a better game, but it moves damage numbers and
+invalidates the §5 difficulty pass, so it deserves its own measurement rather
+than arriving as a side effect of a look pass.
+
 ~~**Nothing teaches weapon switching or reloading.**~~ Partly addressed. A
 legend (`[1-4] weapons  [R] reload  [SHIFT] sprint`) shows for the first 45
 seconds, and `[R] RELOAD` appears whenever the magazine is empty. Still no
