@@ -54,6 +54,17 @@ local DECLARATIONS: { [string]: RemoteKind } = {
 	--- Lancer at 55 hit you from off-screen with nothing to see or trace back.
 	EnemyShot = "Reliable",
 
+	--- Server -> client, to the struck player only. Where a hit came from, so
+	--- the HUD can point at it. Fired per strike rather than riding EnemyShot:
+	--- that one is FireAllClients and ranged-only, and being hit by something
+	--- you cannot see is *more* disorienting in melee, not less.
+	DamageFrom = "Reliable",
+
+	--- Client -> server. Asks to start a fresh run once this one is over.
+	--- Reliable, and validated against `Run.canRedeploy` — a client asking
+	--- mid-run, or twice in a frame, is refused rather than trusted.
+	RedeployRequest = "Reliable",
+
 	--- Client -> server. Sprint started or stopped. The movement guard budgets
 	--- horizontal speed against a provider, and a sprint it has not been told
 	--- about is indistinguishable from a speed hack -- the same shape as the

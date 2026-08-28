@@ -93,10 +93,12 @@ function EnemyCombatService.setStrikePredicate(predicate: (userId: number) -> bo
 	canBeStruck = predicate
 end
 
---- Live players as attack targets, with the humanoid needed to apply damage.
-local function livingTargets(): ({ EnemyAttack.Target }, { [number]: Humanoid })
+--- Live players as attack targets, with the humanoid needed to apply damage
+--- and the Player needed to address a per-player remote back at them.
+local function livingTargets(): ({ EnemyAttack.Target }, { [number]: Humanoid }, { [number]: Player })
 	local targets: { EnemyAttack.Target } = {}
 	local humanoids: { [number]: Humanoid } = {}
+	local players: { [number]: Player } = {}
 
 	for _, player in Players:GetPlayers() do
 		local character = player.Character
@@ -109,11 +111,12 @@ local function livingTargets(): ({ EnemyAttack.Target }, { [number]: Humanoid })
 					pos = Types.vec3(root.Position.X, root.Position.Y, root.Position.Z),
 				})
 				humanoids[player.UserId] = humanoid
+				players[player.UserId] = player
 			end
 		end
 	end
 
-	return targets, humanoids
+	return targets, humanoids, players
 end
 
 local function attackers(): { EnemyAttack.Attacker }
@@ -134,7 +137,7 @@ local function attackers(): { EnemyAttack.Attacker }
 end
 
 function EnemyCombatService.step(_tick: number, _dt: number)
-	local targets, humanoids = livingTargets()
+	local targets, humanoids, players = livingTargets()
 	if #targets == 0 then
 		return
 	end
@@ -155,6 +158,21 @@ function EnemyCombatService.step(_tick: number, _dt: number)
 		end
 
 		humanoid:TakeDamage(strike.damage)
+
+		-- Tell the struck player where it came from. The vignette answers "am I
+		-- being hurt"; this answers "which way do I turn", which is the question
+		-- they can actually act on. Sent to that player alone: nobody else's HUD
+		-- has any use for it, and FireAllClients would multiply the traffic by
+		-- the squad size for no gain.
+		local struck = players[strike.targetId]
+		local attacker = EntityService.get(strike.entityId)
+		if struck ~= nil and attacker ~= nil then
+			Remotes.event("DamageFrom"):FireClient(struck, {
+				from = Vector3.new(attacker.pos.x, attacker.pos.y, attacker.pos.z),
+				kind = strike.kind,
+				damage = strike.damage,
+			})
+		end
 
 		-- Show the shot. Ranged kinds only: a Skitter biting you at three studs
 		-- does not need a tracer, and drawing one would read as it shooting.

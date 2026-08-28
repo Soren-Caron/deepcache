@@ -88,23 +88,44 @@ stale either way.
 
 ## 2. Things that are wired but hollow
 
-**No audio at all.** M7-8. Every hit, shot, death, and zone transition is
-silent, and this is the single largest gap between how the game plays and how
-it feels. Needs real sound assets, which is the blocker — the structure around
-them is not hard.
+**No audio — but the layer is built and the blocker is now only asset
+selection.** M7-8. `core/audio/Cues` (throttle, pitch jitter, attenuation,
+tested), `config/Audio` (15 cues), and `client/AudioController` are all in, and
+every cue point is wired: firing, hit confirm, dry fire, reload start/finish,
+taking a hit, enemy fire, enemy death, pickup, pad open, run end.
 
-**No damage direction indicator.** You know you were hit (vignette) and now you
-can see the bolt (`Effects.enemyBolt`), but only if you were already facing the
-shooter. Enemies attack from up to 55 studs and the Sentry is static, so "which
-way do I turn" is still the question the HUD cannot answer.
-`EnemyCombatService` already has the attacker position and already fires
-`EnemyShot` — the indicator could ride that remote rather than needing a new
-one.
+**Every `assetId` is deliberately empty.** Searching the Creator Store for free
+weapon audio returned user uploads with no usable provenance — the top results
+included one whose own description says it came from *The Elder Scrolls IV:
+Oblivion*. Shipping those trades a silent game for a copyright problem in the
+one artefact meant to be shown to employers.
 
-**Nothing teaches weapon switching or reloading.** Elites beat a Sidearm
-one-on-one *by design* (Warden 700 HP at 15.7 dps, Reclaimer 550 at 26), which
-is fine because 1–4 switch and R reloads — but the game never says so, and
-there is no ammo economy pressure that forces the discovery.
+Because a wired-but-assetless layer and an unwired one are both silent, the
+controller counts: `SoundService.DeepcacheAudio` carries live attributes.
+Verified during real combat — **`requested=14, playedNoAsset=6,
+suppressedByThrottle=8`**, i.e. 13 `hitTaken` cues plus one `runEnd`, of which
+8 were correctly throttled. The path is reachable and the throttle works.
+
+Filling the table in is the whole remaining task; nothing else has to change.
+
+~~**No damage direction indicator.**~~ Landed. `EnemyCombatService` fires a
+per-strike `DamageFrom` to the struck player alone; the HUD draws a chevron
+rotated by `core/look/DamageArc`. Verified against real Sentry fire: **17
+strikes produced 17 events and exactly 1 arrow**, because the merge rule
+collapses attackers on a similar bearing rather than ringing the player in
+chevrons. Rotation read −179.8° for a shooter almost directly behind, the fade
+ran 1.00 → 0.82 smoothly, and the layer was empty again after expiry.
+
+The arrow stores the attacker's **world position**, not a screen angle, and
+re-derives the bearing each frame. A stored angle keeps pointing at where the
+shooter was relative to where the player *used to be* facing, so turning
+toward the arrow swings it further away — worse than no arrow.
+
+~~**Nothing teaches weapon switching or reloading.**~~ Partly addressed. A
+legend (`[1-4] weapons  [R] reload  [SHIFT] sprint`) shows for the first 45
+seconds, and `[R] RELOAD` appears whenever the magazine is empty. Still no
+*pressure* to switch — no ammo economy — so this teaches the controls, not the
+tactic.
 
 ~~**Enemies should be humanoid.**~~ Landed in `856ac8b`. R6 rigid limbs, the
 same skeleton the player character uses; see
@@ -125,11 +146,28 @@ Verified: `complete=true, active=0, died=1, lastReason=run_inactive` →
 to `0 carried · 0 credits at risk` with crosshair and stamina bar visible. No
 client change was needed; the 1 Hz `RunState` push does it.
 
-**A real lobby/redeploy loop is still the honest fix** — `runRestart` is a
-command-bar call, not something a player can reach. But the dead end was
-blocking every other verification on this list (see §1's vignette entry, where
-it had been masquerading as a broken probe for weeks), so it was worth doing
-first.
+~~**A real lobby/redeploy loop is still the honest fix**~~ — now player-facing.
+A `REDEPLOY [ENTER]` control appears when the run ends, sends `RedeployRequest`,
+and the server validates it against the pure `Run.canRedeploy`. Verified end to
+end: refused `run_in_progress` mid-run, refused `too_soon` 1.3 s after the run
+ended, granted at 2.8 s, and **Enter alone restarted the run** (`complete=false,
+active=1, died=0`, entities cleared).
+
+Only once the run is *over*, never on individual death — a player whose
+teammates are still alive stays dead and spectates, or carrying loot out means
+nothing.
+
+**The button itself is unverified, and there is a reason it is not the only
+path.** Roblox `GuiObject` events cannot be driven from the Studio automation
+bridge: a synthetic click lands provably inside the button's rect (cursor at
+697,307 in a rect spanning 567–827 × 281–333) and emits nothing at all, not
+even `MouseEnter`. The remote fired by hand works, and Enter works, so the
+server half and the client half are both proven — but on a branch with this
+much built-and-never-connected history, the primary path should be one a test
+can reach. Hence the keybind.
+
+A lobby place with a proper redeploy flow is still the shape this wants
+eventually; this is the version that makes a 4-person playtest possible.
 
 **Shots ignored enemies when aiming past them.** Fixed, and the numbers are
 worth keeping because they explain "sometimes the bullet doesn't hit them".
@@ -173,13 +211,18 @@ the floor. `spawn` is left as it was — several older notes quote its output.
 
 ## 4. Documentation that contradicts itself
 
-**`docs/11-INTERVIEW-ARTIFACTS.md` states planning-era numbers as
-measurements** — "fallback rate under 3%", "$0.08 per run", "p95 confirmation
-at X ms". They were targets set before anything ran, and they now contradict
-`resume.md` and `docs/12-POSTMORTEM.md`, which carry measured figures. Either
-annotate them as targets or replace them with what was measured. Leaving a
-portfolio document making unbacked numeric claims is the worst of the three
-options.
+~~**`docs/11-INTERVIEW-ARTIFACTS.md` states planning-era numbers as
+measurements.**~~ Fixed. Every figure now cites where it was measured or
+carries `[TARGET]`, and the file opens by saying so.
+
+The worst of them was a résumé line claiming "p95 queue waits under 30 s in
+simulation" when `metrics/m5.md` had measured **42.8 s and recorded a FAIL** —
+an overclaim in material written for job applications, contradicted by this
+repo's own data. The `$0.08/run` figure was stale in a different way: the
+project moved to self-hosted Ollama, so marginal cost is ~zero, while the real
+story is the **~50% fallback rate against a <3% target** and a deliberate
+refusal to relax the 1200 ms budget to improve it. `resume.md` had all of this
+right the whole time; only docs/11 was wrong.
 
 **`resume.md` is untracked.** It exists at the repo root and is not in git.
 

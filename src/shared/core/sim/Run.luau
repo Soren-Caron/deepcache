@@ -261,6 +261,30 @@ function Run.openZones(state: RunState): { string }
 	return out
 end
 
+--- May a redeploy be granted right now?
+---
+--- The rule is deliberately narrow: only once the run is *over*. A player who
+--- dies while teammates are still alive stays dead and spectates, because
+--- letting them respawn mid-run would delete the only stake an extraction
+--- shooter has — carrying loot out is meaningless if dying costs nothing.
+---
+--- `sinceComplete` is injected rather than read from a clock, both because
+--- core may not read one and because the debounce is the part worth testing:
+--- without it, a held key or a spamming client restarts the run many times per
+--- second, and every restart rebuilds the loot table.
+function Run.canRedeploy(state: RunState, sinceComplete: number, debounceSeconds: number): (boolean, string?)
+	if not state.complete then
+		return false, "run_in_progress"
+	end
+	if sinceComplete ~= sinceComplete or sinceComplete < 0 then
+		return false, "bad_clock"
+	end
+	if sinceComplete < debounceSeconds then
+		return false, "too_soon"
+	end
+	return true
+end
+
 function Run.summary(state: RunState): { [string]: any }
 	local extracted, died, active, banked = 0, 0, 0, 0
 	for _, player in state.players do

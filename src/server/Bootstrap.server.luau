@@ -69,6 +69,51 @@ local function playerTargets(): { EntityService.Target }
 	return out
 end
 
+--- Start a fresh run in place, without restarting the server.
+---
+--- Shared by the `runRestart` diagnostic and by the player-facing redeploy
+--- remote, so the thing a player triggers is the thing that gets smoke-tested
+--- rather than a parallel implementation that drifts from it.
+---
+--- Order matters: entities die before the run is rebuilt, or the first tick of
+--- the new run inherits a swarm spawned against the old one's budget and the
+--- difficulty curve starts halfway up.
+local function restartRun(seed: number?): number
+	WaveService.reset()
+	for _, view in EntityService.views() do
+		EntityService.remove(view.id)
+	end
+	EnemyCombatService.reset()
+
+	-- A dead player has to be back on their feet before `start`, because
+	-- `Run.new` takes the roster as active and a corpse cannot extract.
+	local respawned = 0
+	for _, player in Players:GetPlayers() do
+		local character = player.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		if humanoid == nil or humanoid.Health <= 0 then
+			player:LoadCharacter()
+			respawned += 1
+		else
+			humanoid.Health = humanoid.MaxHealth
+		end
+	end
+
+	-- `start` calls LootService.populate, which clears the ground *and* every
+	-- carry, so a restart cannot bank loot picked up in the previous run.
+	RunLifecycleService.start(seed or Rooms.defaultSeed)
+
+	-- Carry is now empty but the HUD's weight bar still shows the old number:
+	-- CarryUpdate only fires on pickup and drop, and neither happened. Push it
+	-- explicitly, which also restores WalkSpeed for anyone who was crawling
+	-- under a full load when the run ended.
+	for _, player in Players:GetPlayers() do
+		LootService.refresh(player)
+	end
+
+	return respawned
+end
+
 local function main()
 	Remotes.init()
 
@@ -90,6 +135,14 @@ local function main()
 	-- Loot asks the run whether a player may still carry, so a dead or
 	-- extracted player cannot keep looting.
 	LootService.setCarryPredicate(RunLifecycleService.isActive)
+
+	-- How the run restarts itself when a player redeploys. Injected rather than
+	-- reached for, so RunLifecycleService does not have to know about waves,
+	-- entities, or enemy cooldowns to own the *rule* about when a restart is
+	-- allowed.
+	RunLifecycleService.setRestarter(function(seed: number?)
+		restartRun(seed)
+	end)
 
 	-- OVERSEER (M4): the FSM baseline runs regardless of backend
 	-- availability, per this file's own boot-order contract above.
@@ -767,48 +820,32 @@ local function main()
 	-- This is the cheap fix, not the honest one. The honest one is a lobby and
 	-- a redeploy, which is a real feature with a real UI; see docs/13 §3.
 	Diagnostics.register("runRestart", function(seed: number?)
-		-- Order matters. Entities die before the run is rebuilt, or the first
-		-- tick of the new run inherits a swarm that was spawned against the old
-		-- one's budget and the difficulty curve starts halfway up.
-		WaveService.reset()
-		for _, view in EntityService.views() do
-			EntityService.remove(view.id)
-		end
-		EnemyCombatService.reset()
-
-		-- A dead player has to be back on their feet before `start`, because
-		-- `Run.new` takes the roster as active and a corpse cannot extract.
-		local respawned = 0
-		for _, player in Players:GetPlayers() do
-			local character = player.Character
-			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-			if humanoid == nil or humanoid.Health <= 0 then
-				player:LoadCharacter()
-				respawned += 1
-			else
-				humanoid.Health = humanoid.MaxHealth
-			end
-		end
-
-		-- `start` calls LootService.populate, which clears the ground *and* every
-		-- carry, so a restart cannot bank loot picked up in the previous run.
-		local usedSeed = seed or Rooms.defaultSeed
-		RunLifecycleService.start(usedSeed)
-
-		-- Carry is now empty but the HUD's weight bar still shows the old
-		-- number: CarryUpdate only fires on pickup and drop, and neither
-		-- happened. Push it explicitly, which also restores WalkSpeed for anyone
-		-- who was crawling under a full load when the run ended.
-		for _, player in Players:GetPlayers() do
-			LootService.refresh(player)
-		end
-
+		local respawned = restartRun(seed)
 		return {
-			seed = usedSeed,
+			seed = seed or Rooms.defaultSeed,
 			respawned = respawned,
 			entitiesRemaining = EntityService.count(),
 			run = RunLifecycleService.describe(),
 			waves = WaveService.describe(),
+		}
+	end)
+
+	-- Same path a player's REDEPLOY button takes, driven without a click, so a
+	-- smoke test can prove the server half works when the UI half is untestable
+	-- from here.
+	Diagnostics.register("redeployProbe", function()
+		local player = Players:GetPlayers()[1]
+		if player == nil then
+			return { error = "no player connected" }
+		end
+		local before = RunLifecycleService.describe()
+		local ok, reason = RunLifecycleService.requestRedeploy(player)
+		task.wait(0.3)
+		return {
+			runWasComplete = before.complete,
+			granted = ok,
+			refusedBecause = reason,
+			runAfter = RunLifecycleService.describe(),
 		}
 	end)
 

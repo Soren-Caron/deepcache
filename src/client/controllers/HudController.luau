@@ -34,6 +34,7 @@ local UserInputService = game:GetService("UserInputService")
 local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 
 local Remotes = require(Shared.net.Remotes)
+local DamageArc = require(Shared.core.look.DamageArc)
 local LookController = require("./LookController")
 local EconomyConfig = require(Shared.config.Economy)
 local ZonesConfig = require(Shared.config.Zones)
@@ -85,6 +86,28 @@ local crosshair: Frame
 local hitmarker: Frame
 local hurtVignette: Frame
 
+local redeployButton: TextButton
+local hintLabel: TextLabel
+
+--- Damage-direction indicators, newest last.
+---
+--- The attacker's *world* position is stored, not a screen angle. A stored
+--- angle would keep pointing at where the shooter was relative to where the
+--- player used to be facing, so turning toward the arrow would swing it
+--- further away -- worse than no arrow at all. Re-deriving the bearing each
+--- frame against the live camera makes the arrow behave like a compass.
+type DamageMark = { fromX: number, fromZ: number, at: number, frame: Frame }
+local damageMarks: { DamageMark } = {}
+local damageLayer: Frame
+
+--- How long an arrow lives, and how close two hits have to be before they
+--- refresh one arrow instead of stacking two.
+local DAMAGE_MARK_SECONDS = 1.6
+local DAMAGE_MERGE_RADIANS = 0.45
+--- Cap on simultaneous arrows. A swarm otherwise rings the player in arrows,
+--- which conveys less than three do.
+local DAMAGE_MARK_LIMIT = 4
+
 --- Mirrored from PredictionController through a hook, not read from it: the
 --- HUD displaying what the prediction layer believes is the whole point, and
 --- two sources for one number is how a HUD ends up confidently lying.
@@ -98,6 +121,11 @@ local reloadSeconds = 0
 local hitmarkerUntil = 0
 local hurtUntil = 0
 local lastHealth = -1
+--- The controls legend shows for a while after joining and then gets out of
+--- the way. Permanent would be clutter; never would leave weapon switching and
+--- reload undiscoverable, and both decide fights against elites.
+local hintUntil = 0
+local HINT_SECONDS = 45
 
 local HITMARKER_SECONDS = 0.12
 local HURT_FLASH_SECONDS = 0.45
@@ -111,6 +139,8 @@ local latest = {
 	status = "active",
 	active = 0,
 	complete = false,
+	canRedeploy = false,
+	endReason = nil :: string?,
 	weight = 0,
 	value = 0,
 	speedMultiplier = 1,
@@ -266,9 +296,53 @@ local function render()
 		hitmarker.Visible = false
 	end
 
+	-- Damage arrows. Each is one frame rotated about screen centre, so a single
+	-- shape serves every direction.
+	local camera = workspace.CurrentCamera
+	local look = if camera then camera.CFrame.LookVector else Vector3.zAxis
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	local here = if root and root:IsA("BasePart") then root.Position else Vector3.zero
+	for index = #damageMarks, 1, -1 do
+		local mark = damageMarks[index]
+		local opacity = DamageArc.opacity(now - mark.at, DAMAGE_MARK_SECONDS)
+		if opacity <= 0 then
+			mark.frame:Destroy()
+			table.remove(damageMarks, index)
+		else
+			local bearing = DamageArc.bearing(look.X, look.Z, mark.fromX - here.X, mark.fromZ - here.Z)
+			mark.frame.Rotation = math.deg(bearing)
+			for _, child in mark.frame:GetChildren() do
+				if child:IsA("Frame") then
+					child.BackgroundTransparency = 1 - opacity
+				end
+			end
+		end
+	end
+
 	-- The crosshair dims while dead or extracted: nothing to aim at, and a
 	-- live-looking reticle over a corpse is a small lie.
 	crosshair.Visible = not latest.complete and latest.status ~= "dead"
+
+	-- Redeploy. Offered only when the server says so, so the button cannot
+	-- appear a moment before the server would honour it.
+	redeployButton.Visible = latest.canRedeploy == true
+	if redeployButton.Visible then
+		statusLabel.Text = if latest.status == "extracted"
+			then string.format("EXTRACTED  +%d credits", latest.value)
+			else "RUN OVER"
+	end
+
+	-- Contextual hints. The systems that decide fights are the two nobody is
+	-- told about: an elite beats a Sidearm one-on-one by design, and the answer
+	-- is a different weapon or a full magazine.
+	local hint = ""
+	if reloadingWeapon == nil and currentAmmo == 0 then
+		hint = "[R]  RELOAD"
+	elseif now < hintUntil then
+		hint = "[1-4] weapons   [R] reload   [SHIFT] sprint"
+	end
+	hintLabel.Text = hint
+	hintLabel.Visible = hint ~= "" and not latest.complete
 
 	-- Follows the cursor rather than sitting at screen centre. Shots are aimed
 	-- where the mouse points, so a fixed centre reticle would be pointing at
@@ -298,6 +372,77 @@ end
 --- Confirmed by the server, never predicted.
 function HudController.showHitmarker()
 	hitmarkerUntil = os.clock() + HITMARKER_SECONDS
+end
+
+--- Build one arrow: a wedge sitting above centre, rotated into place by
+--- `render`. Two stacked bars rather than an image, so it needs no asset.
+local function makeArrow(): Frame
+	local arrow = Instance.new("Frame")
+	arrow.Size = UDim2.new(0, 0, 0, 0)
+	arrow.Position = UDim2.new(0, 0, 0, 0)
+	arrow.BackgroundTransparency = 1
+	arrow.ZIndex = 6
+	arrow.Parent = damageLayer
+
+	for _, spec in
+		{
+			-- { size, offset from centre } -- a short thick bar with a longer
+			-- thin one behind it reads as a chevron pointing outward.
+			{ UDim2.new(0, 46, 0, 5), -120 },
+			{ UDim2.new(0, 26, 0, 5), -134 },
+		}
+	do
+		local bar = Instance.new("Frame")
+		bar.Size = spec[1] :: UDim2
+		bar.Position = UDim2.new(0, -(spec[1] :: UDim2).X.Offset / 2, 0, spec[2] :: number)
+		bar.BackgroundColor3 = ALERT
+		bar.BorderSizePixel = 0
+		bar.ZIndex = 6
+		bar.Parent = arrow
+	end
+
+	return arrow
+end
+
+--- A hit arrived from `from` (world space).
+---
+--- Attackers on nearly the same bearing refresh one arrow rather than stacking
+--- two on top of each other, which just looks like a rendering fault. The
+--- merge test runs against the bearing *at the time of the hit*, which is the
+--- only moment the two are comparable.
+function HudController.showDamageFrom(from: Vector3)
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if root == nil or not root:IsA("BasePart") then
+		return
+	end
+	local camera = workspace.CurrentCamera
+	local look = if camera then camera.CFrame.LookVector else Vector3.zAxis
+	local incoming = DamageArc.bearing(look.X, look.Z, from.X - root.Position.X, from.Z - root.Position.Z)
+
+	for _, mark in damageMarks do
+		local existing = DamageArc.bearing(
+			look.X,
+			look.Z,
+			mark.fromX - root.Position.X,
+			mark.fromZ - root.Position.Z
+		)
+		if DamageArc.shouldMerge(existing, incoming, DAMAGE_MERGE_RADIANS) then
+			mark.fromX, mark.fromZ, mark.at = from.X, from.Z, os.clock()
+			return
+		end
+	end
+
+	-- Oldest out first once the cap is reached: a swarm otherwise rings the
+	-- player in arrows, which conveys less than three do.
+	if #damageMarks >= DAMAGE_MARK_LIMIT then
+		local oldest = table.remove(damageMarks, 1)
+		if oldest then
+			oldest.frame:Destroy()
+		end
+	end
+
+	table.insert(damageMarks, { fromX = from.X, fromZ = from.Z, at = os.clock(), frame = makeArrow() })
 end
 
 --- Pushed by SprintController every frame it ticks.
@@ -440,6 +585,73 @@ function HudController.start()
 	staminaBar.BorderSizePixel = 0
 	staminaBar.Parent = staminaBack
 
+	-- Damage arrows live in their own centred, full-height layer: rotating a
+	-- child about the screen centre only works if its parent is centred, and
+	-- giving them a layer keeps that fact in one place.
+	damageLayer = Instance.new("Frame")
+	damageLayer.Size = UDim2.new(0, 0, 0, 0)
+	damageLayer.Position = UDim2.new(0.5, 0, 0.5, 0)
+	damageLayer.BackgroundTransparency = 1
+	damageLayer.ZIndex = 6
+	damageLayer.Parent = root
+
+	-- Redeploy. A button rather than a keybind: every letter that reads as
+	-- "again" is already taken (R reloads, 1-4 switch, shift sprints), and a
+	-- control that only appears when the run is over does not need to be
+	-- memorised.
+	redeployButton = Instance.new("TextButton")
+	redeployButton.Size = UDim2.new(0, 260, 0, 52)
+	redeployButton.Position = UDim2.new(0.5, -130, 0.5, 40)
+	redeployButton.BackgroundColor3 = Color3.fromRGB(28, 30, 36)
+	redeployButton.BorderSizePixel = 0
+	redeployButton.Font = Enum.Font.Code
+	redeployButton.TextSize = 22
+	redeployButton.TextColor3 = ACCENT
+	redeployButton.Text = "REDEPLOY  [ENTER]"
+	redeployButton.AutoButtonColor = true
+	redeployButton.Visible = false
+	redeployButton.ZIndex = 7
+	redeployButton.Parent = root
+
+	local buttonStroke = Instance.new("UIStroke")
+	buttonStroke.Color = ACCENT
+	buttonStroke.Thickness = 1
+	buttonStroke.Transparency = 0.4
+	buttonStroke.Parent = redeployButton
+
+	--- Ask, do not assume. The server owns whether this is allowed; the button
+	--- hides itself on the next RunState if the run really restarted.
+	local function askToRedeploy()
+		if not redeployButton.Visible then
+			return
+		end
+		Remotes.event("RedeployRequest"):FireServer()
+	end
+
+	redeployButton.Activated:Connect(askToRedeploy)
+
+	-- Enter does the same thing. Partly because a player who just died reaches
+	-- for a key before a mouse, and partly for a duller reason: GuiObject
+	-- events cannot be driven by the Studio automation bridge -- a synthetic
+	-- click lands inside the button's rect without emitting so much as
+	-- MouseEnter -- so a button is the one control shape that cannot be
+	-- verified without a human. Given how much of this branch turned out to be
+	-- built-but-never-connected, the primary path should be one that can be
+	-- tested. Enter is free during play: R reloads, 1-4 switch, shift sprints.
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed or input.KeyCode ~= Enum.KeyCode.Return then
+			return
+		end
+		askToRedeploy()
+	end)
+
+	-- Hints sit under the vitals line, where the player is already looking for
+	-- ammo when they run dry.
+	hintLabel = makeLabel(root, UDim2.new(0, 420, 0, 22), UDim2.new(1, -444, 1, -32), 15, Enum.TextXAlignment.Right)
+	hintLabel.TextColor3 = ACCENT
+	hintLabel.Visible = false
+	hintUntil = os.clock() + HINT_SECONDS
+
 	statusLabel = makeLabel(root, UDim2.new(0, 520, 0, 22), UDim2.new(0, 24, 1, -30), 16, Enum.TextXAlignment.Left)
 	vitalsLabel = makeLabel(root, UDim2.new(0, 200, 0, 30), UDim2.new(1, -224, 1, -60), 24, Enum.TextXAlignment.Right)
 
@@ -471,10 +683,19 @@ function HudController.start()
 		end
 	end)
 
+	Remotes.event("DamageFrom").OnClientEvent:Connect(function(payload: any)
+		if typeof(payload) ~= "table" or typeof(payload.from) ~= "Vector3" then
+			return
+		end
+		HudController.showDamageFrom(payload.from)
+	end)
+
 	Remotes.event("RunState").OnClientEvent:Connect(function(payload: any)
 		if typeof(payload) ~= "table" then
 			return
 		end
+		latest.canRedeploy = payload.canRedeploy == true
+		latest.endReason = payload.endReason
 		latest.remaining = payload.remaining or latest.remaining
 		latest.elapsed = payload.elapsed or latest.elapsed
 		latest.openPads = payload.openPads or latest.openPads
