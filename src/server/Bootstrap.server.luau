@@ -1376,6 +1376,7 @@ local function main()
 	end)
 
 	Diagnostics.register("movementMetrics", MovementGuardService.getMetrics)
+	Diagnostics.register("movementViolations", MovementGuardService.getViolations)
 	Diagnostics.register("bandwidth", ReplicationService.sampleBandwidth)
 	Diagnostics.register("bench", TickBench.run)
 	Diagnostics.register("benchSweep", TickBench.sweep)

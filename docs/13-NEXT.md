@@ -206,6 +206,48 @@ GUI-inset correction above. The parallax bug was found while chasing it.
 the head, where a sphere has little horizontal extent anyway. Not zero, and not
 claimed to be.
 
+~~**Movement stutters and cancels itself, especially on jump or sprint.**~~
+Reported from play, and it was two guard bugs stacked.
+
+*Measuring the network instead of the player.* The guard sampled a replicated
+position on its own fixed tick and divided by that tick's dt — but positions
+arrive in bursts, so some ticks saw nothing and the next absorbed two packets'
+worth. An honest player walking at 16 produced per-tick samples of 24.5, 27.0
+and 29.9 studs/s against a 21.6 allowance. Roughly one false violation a second
+against a decay of one a second, so the score ratcheted upward instead of
+settling. Speed is now judged over a **0.75 s window**, which is immune to
+bursting and still catches a hack, because a hack sustains.
+
+The same window fixed a second race for free: the client raises its own
+WalkSpeed the instant sprint starts and only *then* tells the server, so for one
+round trip the guard budgeted 16 against a player doing 25.6. The window uses
+the most permissive allowance it saw, so a sprint that began anywhere inside it
+is budgeted as a sprint.
+
+*Corrections without evidence.* Far worse. The action branch read only the
+standing score, so once it crossed `correctAt` **every subsequent tick issued
+another correction** until the score decayed back under — at 1/s from a
+threshold of 5, that is seconds of being teleported to your previous position
+20 times a second. Live session: **7 violations produced 109 corrections.**
+That is not a correction, it is being pinned in place, and it is exactly the
+reported symptom. A correction now requires a violation *this* evaluation; the
+score still decides whether a fresh one is worth acting on.
+
+Verified: the identical input that produced 6 violations now produces 0, and
+the probe that produced 7/109 now produces 0/0. The guard still bites — a real
+client-side WalkSpeed hack at 90 was caught at 68–110 studs/s against a 21.6
+allowance, 8 violations and 7 corrections, score escalating 5.3 → 16.6 toward
+the kick threshold.
+
+**Note the pure tests did not catch either bug**, and could not have: both live
+in the relationship between a fixed server tick and a bursty replication
+stream, which no unit test was modelling. There are now tests for both — and
+the first regression test written for the correction bug **passed against the
+bug**, because a single teleport lands the score exactly on the threshold and
+one decay tick drops it under. It only became a real test once it pushed the
+score clear of the threshold. A regression test that has never been run against
+the regression is a guess.
+
 **`onDespawn` releases the part but never removes the entity from
 `baseline`.** Harmless today because the next snapshot re-adds it, but the
 client's baseline can only grow within a run.

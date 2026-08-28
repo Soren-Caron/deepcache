@@ -26,6 +26,10 @@ return {
 	VIOLATION_DECAY_PER_SEC = 1.0,
 	VIOLATION_CORRECT_AT = 5,
 	VIOLATION_KICK_AT = 20,
+	-- Seconds of movement averaged together before speed is judged. Per-tick
+	-- sampling of a replicated position measures when packets arrived, not how
+	-- fast the player moved -- see core/sim/MovementGuard's `windowSeconds`.
+	VIOLATION_WINDOW_SECONDS = 0.75,
 
 	-- Vertical movement is budgeted separately from walk speed; see
 	-- core/sim/MovementGuard. Multiplier applied to the jump impulse the
