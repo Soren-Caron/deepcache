@@ -224,12 +224,19 @@ local function render()
 	clockLabel.TextColor3 = if latest.remaining <= 60 then ALERT else ACCENT
 
 	local tierIndex, tierName = weightTier(latest.weight)
-	weightLabel.Text = string.format(
-		"%3.0f kg   x%.2f   %s",
-		latest.weight,
-		latest.speedMultiplier,
-		tierName
-	)
+	-- Shown as a speed *penalty*, not as the raw multiplier.
+	--
+	-- This line used to read "49 kg   x0.82   committed", and the first thing
+	-- a player asked was what x0.82 meant. docs/01 argues that "47 kg" means
+	-- nothing without "0.82x, committed" -- which is right, and does not go far
+	-- enough, because 0.82x does not stand on its own either. It is only
+	-- legible if you already know there is a multiplier and what it multiplies.
+	-- A percentage needs no reference table and answers the question the number
+	-- exists for: how much is this costing me.
+	local penalty = math.floor((1 - latest.speedMultiplier) * 100 + 0.5)
+	weightLabel.Text = if penalty <= 0
+		then string.format("%3.0f kg   full speed   %s", latest.weight, tierName)
+		else string.format("%3.0f kg   -%d%% speed   %s", latest.weight, penalty, tierName)
 	-- The bar fills toward the last tier's threshold, so "how close am I to
 	-- crawling" is readable without doing arithmetic.
 	local tiers = EconomyConfig.weight.tiers
