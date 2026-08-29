@@ -100,6 +100,9 @@ local summaryBody: TextLabel
 local bannerLabel: TextLabel
 local bannerUntil = 0
 local BANNER_SECONDS = 4.5
+--- Shorter than a pad announcement: a notice is a reaction to something the
+--- player just did, so it has to clear before their next attempt.
+local NOTICE_SECONDS = 1.6
 
 --- Damage-direction indicators, newest last.
 ---
@@ -514,6 +517,20 @@ end
 --- exists.
 function HudController.setMeleeCooldown(fraction: number, _ready: boolean)
 	meleeReadiness = fraction
+end
+
+--- A short transient line in the middle of the screen.
+---
+--- Shared with the pad/extraction banners rather than given its own element:
+--- two banners that can be on screen at once is a layout problem, and these
+--- are all "something just happened that you need to know about now".
+function HudController.showBanner(text: string, alert: boolean?)
+	if bannerLabel == nil then
+		return
+	end
+	bannerLabel.Text = text
+	bannerLabel.TextColor3 = if alert then ALERT else DIM
+	bannerUntil = os.clock() + NOTICE_SECONDS
 end
 
 --- Pushed by RepairController every frame.

@@ -59,7 +59,14 @@ local function main()
 	end)
 	MeleeController.start()
 
-	RepairController.setHooks({ onChanged = HudController.setRepair })
+	RepairController.setHooks({
+		onChanged = HudController.setRepair,
+		-- Why a repair was refused or dropped. Without this the player presses
+		-- [G], nothing happens, and there is nothing on screen to learn from.
+		onNotice = function(text: string)
+			HudController.showBanner(text, true)
+		end,
+	})
 	RepairController.start()
 
 	-- Which weapon is live, mirrored here so the fire cue can be per-weapon.

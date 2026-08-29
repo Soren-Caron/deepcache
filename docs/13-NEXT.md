@@ -218,6 +218,28 @@ and the completing delta on its own is under a tenth of it.
 fixed heal made a charge worth less the healthier you were, which rewarded
 walking around hurt. `charges` is now the only thing limiting healing.
 
+**And [G] is now a press, not a hold.** Reported as "pressing G doesn't heal me
+to max", and reproduced exactly: a single tap gave `started=1`,
+`interrupted=1`, `healed=0.33` — a third of a hit point for a whole charge. The
+channel required the key held for 1.6s and `InputEnded` cancelled it, while the
+HUD hint said only `[G] repair`. Nothing anywhere said to hold it.
+
+The same trap had a second shape: pressing [G] *while moving* started the
+channel and the movement check cancelled it on the next frame, again for a
+charge. That is now refused before the request is sent — a refusal costs
+nothing, a cancel costs the charge — and both refusals put a line on the HUD
+(`HOLD STILL TO REPAIR`, `REPAIR INTERRUPTED`) via a new
+`HudController.showBanner`, because "press the key and nothing happens" is
+unlearnable.
+
+Verified in Studio, single tap, standing still: 40 → 150 HP, `started=1`,
+`completed=1`, `interrupted=0`. Press while moving: `started` unchanged at 1,
+`refused` 0 — the request never left the client, so no charge was spent.
+
+The general shape, worth remembering: **an input that costs a resource must not
+be cancellable by the same action that started it.** Both bugs were one input
+spending a charge and revoking it in the same gesture.
+
 The channel sits under the sweep's 3.5s cooldown on purpose, so sweep-then-heal
 is possible once per cooldown rather than freely.
 

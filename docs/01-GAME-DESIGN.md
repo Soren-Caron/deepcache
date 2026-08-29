@@ -133,11 +133,19 @@ default, never set by this project), its default ~1 HP/s
 regeneration, and a twelve-minute run — so forty damage cost forty seconds of
 walking it off, and one bad room was unrecoverable rather than expensive.
 
-**[G] holds a 1.6-second channel and restores full health. Two charges, and
+**[G] starts a 1.6-second channel and restores full health. Two charges, and
 they do not refill.** The shape preserves the run's tension instead of removing
 it. A regenerating heal turns every fight into attrition the player wins by
 waiting; finite charges make "do I burn one here" a real question, which is the
 same question the whole game is about.
+
+It is a **press, not a hold**, and pressing again abandons a channel in
+progress. It was a hold, briefly, and that was a trap: a tap started the
+channel and the key release cancelled it milliseconds later, so the player
+spent a charge, got a third of a hit point, and had nothing on screen saying
+why. Pressing [G] *while already moving* is refused outright rather than
+started and immediately cancelled — a refusal costs nothing, a cancel costs the
+charge.
 
 The heal is to full rather than a fixed number of points because a fixed heal
 made a charge worth less the healthier you were, so the optimal play was to

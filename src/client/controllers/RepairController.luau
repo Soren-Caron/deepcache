@@ -1,9 +1,19 @@
 --!strict
 --[[ Field repair, client side.
 
-	Holds [G]. Releasing cancels, and so does moving -- the channel is meant to
-	pin you in place, and letting a player heal while walking would remove the
-	only cost it has.
+	**[G] is a press, not a hold.** It was a hold, and that was a trap: a tap
+	began the channel and the key release cancelled it a few milliseconds
+	later, so the player spent a charge, received a third of a hit point, and
+	had nothing on screen explaining why. Nothing labelled it as a hold either
+	-- the HUD said "[G] repair". Pressing again abandons a channel in progress,
+	so a mistaken start does not pin you in place.
+
+	Moving still cancels: the channel is meant to hold you still, and letting a
+	player heal while walking would remove the only cost it has. But pressing
+	[G] *while already moving* is refused outright rather than started and
+	immediately cancelled -- a refusal costs nothing, and a cancel costs the
+	charge. That is the same trap in a different shape, and it is why the check
+	happens before the request rather than after it.
 
 	Everything authoritative lives on the server: charges, whether the channel
 	completed, and the health it applies. This asks, and draws a bar.
@@ -31,11 +41,17 @@ local player = Players.LocalPlayer
 local charges = RepairConfig.charges
 local repairing = false
 local startedAt = 0
-local held = false
+--- A cancel is in flight. `repairing` stays true until the server answers, so
+--- without this the movement check would fire a cancel every frame of the
+--- round trip -- and a notice with it.
+local cancelSent = false
 local connection: RBXScriptConnection? = nil
 
 local hooks = {
 	onChanged = function(_charges: number, _progress: number, _repairing: boolean) end,
+	--- Short player-facing line explaining a refusal or an interruption. The
+	--- controller knows *why* it refused; the server only ever sees the result.
+	onNotice = function(_text: string) end,
 }
 
 function RepairController.setHooks(newHooks: { [string]: any })
@@ -66,9 +82,13 @@ function RepairController.getState()
 	return { charges = charges, repairing = repairing, progress = RepairController.progress() }
 end
 
-local function cancel()
-	if not repairing then
+local function cancel(notice: string?)
+	if not repairing or cancelSent then
 		return
+	end
+	cancelSent = true
+	if notice then
+		hooks.onNotice(notice)
 	end
 	Remotes.event("RepairRequest"):FireServer("cancel")
 end
@@ -78,16 +98,17 @@ function RepairController.start()
 		if processed or input.KeyCode ~= Enum.KeyCode.G then
 			return
 		end
-		held = true
-		Remotes.event("RepairRequest"):FireServer("begin")
-	end)
-
-	UserInputService.InputEnded:Connect(function(input)
-		if input.KeyCode ~= Enum.KeyCode.G then
+		if repairing then
+			cancel("REPAIR ABANDONED")
 			return
 		end
-		held = false
-		cancel()
+		if moving() then
+			-- Refused, not started-and-cancelled. See the header: starting here
+			-- would spend the charge and throw it away in the same frame.
+			hooks.onNotice("HOLD STILL TO REPAIR")
+			return
+		end
+		Remotes.event("RepairRequest"):FireServer("begin")
 	end)
 
 	Remotes.event("RepairState").OnClientEvent:Connect(function(payload: any)
@@ -100,13 +121,14 @@ function RepairController.start()
 		local nowRepairing = payload.repairing == true
 		if nowRepairing and not repairing then
 			startedAt = os.clock()
+			cancelSent = false
 		end
 		repairing = nowRepairing
 	end)
 
 	player.CharacterAdded:Connect(function()
 		repairing = false
-		held = false
+		cancelSent = false
 	end)
 
 	if connection == nil then
@@ -115,8 +137,8 @@ function RepairController.start()
 			-- client is the only place that knows the input the instant it
 			-- happens, and the server re-checks the thing that matters anyway:
 			-- it is the one applying the health.
-			if repairing and (moving() or not held) then
-				cancel()
+			if repairing and moving() then
+				cancel("REPAIR INTERRUPTED")
 			end
 			hooks.onChanged(charges, RepairController.progress(), repairing)
 		end)
