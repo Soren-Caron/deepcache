@@ -21,6 +21,8 @@ local FLASH_SECONDS = 0.045
 local IMPACT_SECONDS = 0.20
 --- Flight time for an enemy bolt, whatever the distance.
 local BOLT_SECONDS = 0.11
+--- How long the melee arc stays on screen.
+local SWEEP_SECONDS = 0.30
 
 local container: Folder? = nil
 
@@ -167,6 +169,55 @@ function Effects.enemyBolt(from: Vector3, to: Vector3, colour: Color3?)
 		bolt.CFrame = CFrame.lookAt(at, at + direction)
 		-- Fades only at the very end, so most of the flight is fully visible.
 		bolt.Transparency = 0.05 + 0.95 * math.max(0, (t - 0.75) / 0.25)
+	end)
+end
+
+--- The melee sweep: a bright arc swept through the ground plane in front of
+--- the swinger.
+---
+--- Built from a handful of thin segments along the arc rather than one mesh,
+--- because the shape has to match `config/Melee` exactly -- a visual that
+--- disagrees with the hitbox is worse than no visual, since the player learns
+--- the wrong reach. Both come from the same numbers, passed down on the wire.
+function Effects.meleeSweep(from: Vector3, facingYaw: number, radius: number, arcDegrees: number, colour: Color3?)
+	local SEGMENTS = 9
+	local arc = math.rad(arcDegrees)
+	local tint = colour or Color3.fromRGB(190, 225, 255)
+	local parts: { Part } = {}
+
+	for index = 0, SEGMENTS - 1 do
+		-- Sweep from one edge of the arc to the other.
+		local t = index / (SEGMENTS - 1)
+		local angle = facingYaw - arc / 2 + arc * t
+		local direction = Vector3.new(math.sin(angle), 0, math.cos(angle))
+		local mid = from + direction * (radius * 0.55)
+
+		local blade = makePart()
+		blade.Color = tint
+		blade.Size = Vector3.new(0.35, 0.35, radius * 0.9)
+		blade.CFrame = CFrame.lookAt(mid, mid + direction) 
+		blade.Transparency = 0.2
+		parts[#parts + 1] = blade
+	end
+
+	local start = os.clock()
+	local connection: RBXScriptConnection
+	connection = RunService.RenderStepped:Connect(function()
+		local t = (os.clock() - start) / SWEEP_SECONDS
+		if t >= 1 then
+			connection:Disconnect()
+			for _, part in parts do
+				part:Destroy()
+			end
+			return
+		end
+		-- Segments reveal in order, so the arc reads as swept rather than as a
+		-- fan appearing all at once.
+		for index, part in parts do
+			local lead = (index - 1) / #parts
+            local local_t = math.clamp((t - lead * 0.45) / 0.55, 0, 1)
+			part.Transparency = if local_t <= 0 then 1 else 0.2 + 0.8 * local_t
+		end
 	end)
 end
 

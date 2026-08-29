@@ -7,6 +7,17 @@
 ]]
 
 return {
+	--- Fraction of a zone's visible distance that an enemy may attack from.
+	---
+	--- Enemy reach is capped at `fogEnd * this`. The Vault's fog ends at 45
+	--- studs and a Lancer's authored range is 55, so before this it attacked
+	--- from inside the fog -- from a place the renderer deliberately hides.
+	--- Being hit by something you could never have seen reads as the game
+	--- cheating rather than as a threat you misplayed. Below 1 rather than
+	--- exactly 1, so the attacker is properly visible when it opens fire rather
+	--- than a silhouette dissolving at the boundary.
+	ATTACK_VISIBILITY_FRACTION = 0.8,
+
 	--- Effective radius of a player character, for personal-space purposes.
 	--- Roblox's default rig is roughly 2 wide and 5 tall; this is the XZ
 	--- footprint an enemy should refuse to stand inside.

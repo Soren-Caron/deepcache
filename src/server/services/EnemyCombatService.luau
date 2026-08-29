@@ -20,12 +20,15 @@
 local Players = game:GetService("Players")
 local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 
+local CombatConfig = require(Shared.config.Combat)
 local EnemiesConfig = require(Shared.config.Enemies)
+local ZonesConfig = require(Shared.config.Zones)
 local EnemyAttack = require(Shared.core.sim.EnemyAttack)
 local Types = require(Shared.core.Types)
 
 local Remotes = require(Shared.net.Remotes)
 local EntityService = require("./EntityService")
+local LevelService = require("./LevelService")
 local TelemetryService = require("./TelemetryService")
 
 local EnemyCombatService = {}
@@ -119,6 +122,22 @@ local function livingTargets(): ({ EnemyAttack.Target }, { [number]: Humanoid },
 	return targets, humanoids, players
 end
 
+--- How far a player can see in `zone`, in studs.
+---
+--- The fog distance the look pipeline actually applies, read from the same
+--- preset table rather than duplicated -- two numbers for one quantity is how
+--- they end up disagreeing.
+local function visibilityIn(zone: string?): number?
+	if zone == nil then
+		return nil
+	end
+	local config = (ZonesConfig :: any)[zone]
+	if config == nil or config.lighting == nil then
+		return nil
+	end
+	return config.lighting.fogEnd * CombatConfig.ATTACK_VISIBILITY_FRACTION
+end
+
 local function attackers(): { EnemyAttack.Attacker }
 	local out: { EnemyAttack.Attacker } = {}
 	for _, view in EntityService.views() do
@@ -130,6 +149,12 @@ local function attackers(): { EnemyAttack.Attacker }
 				pos = entity.pos,
 				state = entity.state,
 				targetId = entity.targetId,
+				-- Capped by what is visible from where this entity stands, not from
+				-- where the player stands: the shooter is the one who has to be
+				-- seeable, and it is the one whose zone decides the fog.
+				maxRange = visibilityIn(LevelService.zoneAt(
+					Vector3.new(entity.pos.x, entity.pos.y, entity.pos.z)
+				)),
 			})
 		end
 	end

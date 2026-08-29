@@ -65,6 +65,15 @@ local DECLARATIONS: { [string]: RemoteKind } = {
 	--- mid-run, or twice in a frame, is refused rather than trusted.
 	RedeployRequest = "Reliable",
 
+	--- Client -> server. Asks to swing the melee sweep. Reliable: a dropped
+	--- request leaves the player on cooldown in their own HUD for an attack the
+	--- server never resolved, which reads as the ability being broken.
+	MeleeRequest = "Reliable",
+	--- Server -> client, to everyone. A sweep happened here, facing this way,
+	--- and connected with this many targets. Cosmetic, plus the swinging
+	--- player's own hitmarker -- the damage is already resolved server-side.
+	MeleeSwing = "Reliable",
+
 	--- Client -> server. Sprint started or stopped. The movement guard budgets
 	--- horizontal speed against a provider, and a sprint it has not been told
 	--- about is indistinguishable from a speed hack -- the same shape as the

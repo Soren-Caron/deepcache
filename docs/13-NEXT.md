@@ -144,6 +144,35 @@ same document is wrong.
 
 ## 3. Known bugs and rough edges
 
+~~**Ranged enemies attack from outside the fog.**~~ Reported from play as "the
+ranged guys shoot from very far away", and it was real. Enemy reach is authored
+per kind while visibility is authored per zone, and nothing reconciled them:
+
+| zone | fog ends at | Sentry 45 | Lancer 55 |
+|---|---:|---|---|
+| Perimeter | 180 | fine | fine |
+| Processing | 90 | fine | fine |
+| **Vault** | **45** | on the boundary | **shoots from inside the fog** |
+
+A Lancer in the Vault opened fire from 55 studs into a world the renderer stops
+drawing at 45. Being hit by something you could never have seen reads as the
+game cheating rather than as a threat you misplayed.
+
+Reach is now capped at `fogEnd * ATTACK_VISIBILITY_FRACTION` (0.8) for the zone
+the *attacker* stands in — the shooter is the one who has to be seeable.
+Verified in the Vault, where the cap is 36: a Lancer at 50 studs lands **0
+strikes**, the same Lancer at 25 lands **4 strikes for 51 damage**.
+
+**Studio "lag" was the laptop, not the game.** Worth writing down because the
+measurement looked alarming and meant nothing: 12 fps, pinned at exactly 83.3 ms
+across 540 frames, identical with all 63 lights disabled *and* with every entity
+rig deleted. GPU 0.00-1.1 ms while CPU sat at 84 and physics held 60. That is a
+throttle, not a load — the machine was **on battery at 60% on the Balanced power
+scheme**, and Roblox's `FrameRateManager = Automatic` throttles on battery.
+Studio was already on the RTX 5070 (confirmed via `nvidia-smi`), so it was never
+a GPU-routing problem either. Plug in before profiling anything, and before
+recording.
+
 ~~**A run ends permanently on player death.**~~ Cheap fix landed:
 `bridge:Invoke("runRestart")` clears entities, resets the wave scheduler and
 enemy cooldowns, revives or respawns the roster, restarts the clock, and

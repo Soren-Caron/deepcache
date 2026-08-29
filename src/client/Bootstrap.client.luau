@@ -21,6 +21,7 @@ local LookController = require("./controllers/LookController")
 local RagdollController = require("./controllers/RagdollController")
 local SprintController = require("./controllers/SprintController")
 local AudioController = require("./controllers/AudioController")
+local MeleeController = require("./controllers/MeleeController")
 
 local function main()
 	EntityRenderer.start()
@@ -36,6 +37,25 @@ local function main()
 	AudioController.start()
 	SprintController.setHooks({ onStaminaChanged = HudController.setStamina })
 	SprintController.start()
+
+	-- The sweep. Its arc is drawn from the numbers the server sends rather than
+	-- from the local config, so the visual can never disagree with the hitbox
+	-- that was actually used.
+	MeleeController.setHooks({
+		onCooldownChanged = HudController.setMeleeCooldown,
+		onHit = function(_count: number)
+			HudController.showHitmarker()
+			AudioController.play("hitConfirm")
+		end,
+	})
+	MeleeController.setSwingRenderer(function(payload)
+		if typeof(payload.from) ~= "Vector3" then
+			return
+		end
+		Effects.meleeSweep(payload.from, payload.facing or 0, payload.radius or 12, payload.arcDegrees or 120)
+		AudioController.play("meleeSwing", payload.from)
+	end)
+	MeleeController.start()
 
 	-- Which weapon is live, mirrored here so the fire cue can be per-weapon.
 	-- Four weapons that sound identical read as one weapon.

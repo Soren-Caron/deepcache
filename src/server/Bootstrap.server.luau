@@ -36,6 +36,7 @@ local EntityService = require("./services/EntityService")
 local ReplicationService = require("./services/ReplicationService")
 local CombatService = require("./services/CombatService")
 local EnemyCombatService = require("./services/EnemyCombatService")
+local MeleeService = require("./services/MeleeService")
 local MovementGuardService = require("./services/MovementGuardService")
 local DirectorService = require("./services/DirectorService")
 local WaveService = require("./services/WaveService")
@@ -114,6 +115,47 @@ local function restartRun(seed: number?): number
 	return respawned
 end
 
+--- Ring `count` entities of `kind` around the player, grounded.
+---
+--- Shared by the `spawnAt` diagnostic and the `sweepProbe`, so the probe
+--- exercises the same placement the smoke test does rather than a second
+--- implementation that can drift from it.
+local function spawnRing(kind: string?, count: number?, distance: number?): any
+	local player = Players:GetPlayers()[1]
+	local character = player and player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if root == nil or not root:IsA("BasePart") then
+		return { error = "no character" }
+	end
+	local enemyKind = kind or "Hauler"
+	local config = (require(Shared.config.Enemies) :: any)[enemyKind]
+	if config == nil then
+		return { error = `unknown kind {enemyKind}` }
+	end
+
+	-- Face the direction the character is facing, so a single entity lands in
+	-- front rather than at an arbitrary compass point behind the camera.
+	local forward = root.CFrame.LookVector
+	local n = count or 1
+	local radius = distance or 22
+	local tick = TickService.getTick()
+	local ids: { number } = {}
+	local placed: { string } = {}
+	for i = 1, n do
+		local angle = if n == 1 then 0 else ((i - 1) / n) * math.pi * 2
+		local direction = CFrame.fromAxisAngle(Vector3.yAxis, angle) * forward
+		local at = root.Position + Vector3.new(direction.X, 0, direction.Z).Unit * radius
+		-- Centre the hitbox a radius above the floor, or the sphere sinks
+		-- into it and shots at the lower half stop on the ground.
+		local entity = EntityService.spawn(enemyKind :: any, {
+			x = at.X, y = root.Position.Y - 3 + config.hitboxRadius, z = at.Z,
+		}, tick)
+		table.insert(ids, entity.id)
+		table.insert(placed, string.format("id=%d at (%.1f, %.1f, %.1f)", entity.id, entity.pos.x, entity.pos.y, entity.pos.z))
+	end
+	return { kind = enemyKind, ids = ids, placed = placed, count = EntityService.count() }
+end
+
 local function main()
 	Remotes.init()
 
@@ -129,6 +171,7 @@ local function main()
 	ReplicationService.init()
 	CombatService.init()
 	MovementGuardService.init()
+	MeleeService.init()
 	LootService.init()
 	RunLifecycleService.init()
 
@@ -198,6 +241,10 @@ local function main()
 	-- being a valid target, or corpses and extracted players keep soaking hits.
 	-- Same predicate LootService uses, for the same reason.
 	EnemyCombatService.setStrikePredicate(RunLifecycleService.isActive)
+
+	-- Same predicate again: a dead or extracted player must not keep swinging
+	-- any more than they keep looting or soaking hits.
+	MeleeService.setActionPredicate(RunLifecycleService.isActive)
 
 	-- Before `sim`, so an entity spawned this tick is stepped and recorded into
 	-- the rewind history on the same tick it appears. After replication it
@@ -1046,6 +1093,7 @@ local function main()
 
 	Diagnostics.register("waveInfo", WaveService.describe)
 	Diagnostics.register("enemyCombatMetrics", EnemyCombatService.getMetrics)
+	Diagnostics.register("meleeMetrics", MeleeService.getMetrics)
 
 	-- Enemy damage acceptance: stand a player in a swarm and report what
 	-- actually lands. Reads HP directly rather than trusting the metrics
@@ -1375,6 +1423,31 @@ local function main()
 		return { weapon = id, reloadSeconds = weapon.reloadSeconds, steps = rows, metrics = CombatService.getMetrics() }
 	end)
 
+	-- Melee acceptance without a keypress: spawn a ring inside the arc, swing,
+	-- and report what the sweep actually connected with.
+	Diagnostics.register("sweepProbe", function(kind: string?, count: number?)
+		local player = Players:GetPlayers()[1]
+		if player == nil then
+			return { error = "no player connected" }
+		end
+		MeleeService.reset()
+		local spawned = spawnRing(kind or "Skitter", count or 5, 7)
+		task.wait(0.6)
+		local first = { MeleeService.swing(player) }
+		local afterFirst = MeleeService.getMetrics()
+		-- Immediately again: must be refused by the cooldown.
+		local second = { MeleeService.swing(player) }
+		return {
+			spawned = spawned,
+			firstSwing = { ok = first[1], reason = first[2] },
+			secondSwingImmediately = { ok = second[1], reason = second[2] },
+			targetsHit = afterFirst.hits,
+			kills = afterFirst.kills,
+			damage = afterFirst.damageDealt,
+			metrics = MeleeService.getMetrics(),
+		}
+	 end)
+
 	Diagnostics.register("movementMetrics", MovementGuardService.getMetrics)
 	Diagnostics.register("movementViolations", MovementGuardService.getViolations)
 	Diagnostics.register("bandwidth", ReplicationService.sampleBandwidth)
@@ -1400,41 +1473,7 @@ local function main()
 	-- player's interest radius, never replicate, and the result reads as a
 	-- rendering or targeting failure. This rings the player instead, grounded
 	-- the same way WaveService grounds a real spawn point.
-	Diagnostics.register("spawnAt", function(kind: string?, count: number?, distance: number?)
-		local player = Players:GetPlayers()[1]
-		local character = player and player.Character
-		local root = character and character:FindFirstChild("HumanoidRootPart")
-		if root == nil or not root:IsA("BasePart") then
-			return { error = "no character" }
-		end
-		local enemyKind = kind or "Hauler"
-		local config = (require(Shared.config.Enemies) :: any)[enemyKind]
-		if config == nil then
-			return { error = `unknown kind {enemyKind}` }
-		end
-
-		-- Face the direction the character is facing, so a single entity lands in
-		-- front rather than at an arbitrary compass point behind the camera.
-		local forward = root.CFrame.LookVector
-		local n = count or 1
-		local radius = distance or 22
-		local tick = TickService.getTick()
-		local ids: { number } = {}
-		local placed: { string } = {}
-		for i = 1, n do
-			local angle = if n == 1 then 0 else ((i - 1) / n) * math.pi * 2
-			local direction = CFrame.fromAxisAngle(Vector3.yAxis, angle) * forward
-			local at = root.Position + Vector3.new(direction.X, 0, direction.Z).Unit * radius
-			-- Centre the hitbox a radius above the floor, or the sphere sinks
-			-- into it and shots at the lower half stop on the ground.
-			local entity = EntityService.spawn(enemyKind :: any, {
-				x = at.X, y = root.Position.Y - 3 + config.hitboxRadius, z = at.Z,
-			}, tick)
-			table.insert(ids, entity.id)
-			table.insert(placed, string.format("id=%d at (%.1f, %.1f, %.1f)", entity.id, entity.pos.x, entity.pos.y, entity.pos.z))
-		end
-		return { kind = enemyKind, ids = ids, placed = placed, count = EntityService.count() }
-	end)
+	Diagnostics.register("spawnAt", spawnRing)
 
 	TickService.start()
 

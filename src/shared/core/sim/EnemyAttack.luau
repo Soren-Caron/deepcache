@@ -54,6 +54,15 @@ export type Attacker = {
 	pos: Types.Vec3,
 	state: string,
 	targetId: number?,
+	--- Hard ceiling on this attacker's reach, below its kind's `atkRange`.
+	---
+	--- Set by the adapter from how far the player can actually see in the zone
+	--- the attacker is standing in. A Lancer reaches 55 studs and the Vault's
+	--- fog ends at 45, so it was shooting from inside the fog -- literally from
+	--- a place the renderer hides. Being hit by something you cannot see, and
+	--- could never have seen, reads as the game cheating rather than as a
+	--- threat you misplayed.
+	maxRange: number?,
 }
 
 export type Target = {
@@ -107,6 +116,18 @@ end
 --- Mutates `state`. Returns the strikes to apply; applying them is the
 --- adapter's job, because damage lands on a Humanoid and this module may not
 --- know what one is.
+--- How far this attacker may actually reach.
+---
+--- The kind's authored range, capped by whatever the adapter says is visible
+--- from where it stands. Never widens the range -- an attacker in a brightly
+--- lit zone still only reaches as far as its own stats allow.
+function EnemyAttack.effectiveRange(atkRange: number, maxRange: number?): number
+	if maxRange == nil or maxRange ~= maxRange then
+		return atkRange
+	end
+	return math.min(atkRange, math.max(0, maxRange))
+end
+
 function EnemyAttack.step(
 	state: State,
 	now: number,
@@ -144,7 +165,8 @@ function EnemyAttack.step(
 		end
 
 		local distance = Types.distance(attacker.pos, target.pos)
-		if not isFinite(distance) or distance > config.atkRange then
+		local reach = EnemyAttack.effectiveRange(config.atkRange, attacker.maxRange)
+		if not isFinite(distance) or distance > reach then
 			continue
 		end
 

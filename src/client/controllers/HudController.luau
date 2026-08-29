@@ -79,6 +79,9 @@ local commsLabel: TextLabel
 
 local staminaBar: Frame
 local staminaBack: Frame
+local meleeBar: Frame
+local meleeBack: Frame
+local meleeReadiness = 1
 local staminaFraction = 1
 local staminaExhausted = false
 
@@ -339,7 +342,7 @@ local function render()
 	if reloadingWeapon == nil and currentAmmo == 0 then
 		hint = "[R]  RELOAD"
 	elseif now < hintUntil then
-		hint = "[1-4] weapons   [R] reload   [SHIFT] sprint"
+		hint = "[1-4] weapons   [R] reload   [SHIFT] sprint   [F] sweep"
 	end
 	hintLabel.Text = hint
 	hintLabel.Visible = hint ~= "" and not latest.complete
@@ -358,6 +361,12 @@ local function render()
 		elseif staminaFraction < 0.3 then Color3.fromRGB(220, 170, 90)
 		else GOOD
 	staminaBack.Visible = not latest.complete
+
+	-- Melee cooldown, directly under stamina. All three bars answer the same
+	-- question in different currencies: what can I still do right now.
+	meleeBar.Size = UDim2.new(math.clamp(meleeReadiness, 0, 1), 0, 1, 0)
+	meleeBar.BackgroundColor3 = if meleeReadiness >= 1 then ACCENT else DIM
+	meleeBack.Visible = not latest.complete
 
 	local mouse = UserInputService:GetMouseLocation()
 	crosshair.Position = UDim2.new(0, mouse.X - crosshair.AbsoluteSize.X / 2, 0, mouse.Y - crosshair.AbsoluteSize.Y / 2)
@@ -443,6 +452,15 @@ function HudController.showDamageFrom(from: Vector3)
 	end
 
 	table.insert(damageMarks, { fromX = from.X, fromZ = from.Z, at = os.clock(), frame = makeArrow() })
+end
+
+--- Pushed by MeleeController every frame. 0..1, 1 = ready.
+---
+--- A cooldown the player cannot see is a button that randomly does nothing,
+--- which is indistinguishable from a bug -- the same reason the reload readout
+--- exists.
+function HudController.setMeleeCooldown(fraction: number, _ready: boolean)
+	meleeReadiness = fraction
 end
 
 --- Pushed by SprintController every frame it ticks.
@@ -651,6 +669,19 @@ function HudController.start()
 	hintLabel.TextColor3 = ACCENT
 	hintLabel.Visible = false
 	hintUntil = os.clock() + HINT_SECONDS
+
+	meleeBack = Instance.new("Frame")
+	meleeBack.Size = UDim2.new(0, 320, 0, 3)
+	meleeBack.Position = UDim2.new(0, 24, 1, -37)
+	meleeBack.BackgroundColor3 = Color3.fromRGB(48, 50, 56)
+	meleeBack.BorderSizePixel = 0
+	meleeBack.Parent = root
+
+	meleeBar = Instance.new("Frame")
+	meleeBar.Size = UDim2.new(1, 0, 1, 0)
+	meleeBar.BackgroundColor3 = ACCENT
+	meleeBar.BorderSizePixel = 0
+	meleeBar.Parent = meleeBack
 
 	statusLabel = makeLabel(root, UDim2.new(0, 520, 0, 22), UDim2.new(0, 24, 1, -30), 16, Enum.TextXAlignment.Left)
 	vitalsLabel = makeLabel(root, UDim2.new(0, 200, 0, 30), UDim2.new(1, -224, 1, -60), 24, Enum.TextXAlignment.Right)

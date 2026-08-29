@@ -126,6 +126,31 @@ Four, each a distinct engagement range and a distinct netcode profile:
 
 Ammo is server-authoritative; the client predicts the decrement and reconciles.
 
+### The sweep
+
+Every weapon above is a ray, which leaves one hole in the fight: a Skitter
+swarm closing to four studs is a target you cannot miss and cannot clear,
+because one hitscan round kills exactly one of them.
+
+**[F] sweeps a 120-degree arc, 12 studs, on a 3.5-second cooldown.** It is
+shaped as an escape rather than a damage upgrade: 55 damage kills a Skitter
+outright and takes a third off a Lancer, but it does not meaningfully dent a
+Warden's 700. It buys space; it does not win a fight with an elite.
+
+Two rules keep it from becoming a primary weapon. The arc is measured from the
+*body's* facing, not the camera, so a player cannot hit something behind them
+by flicking the mouse. And reach is measured to the near surface of a target's
+hitbox rather than its centre, so a wide enemy is caught from further out than
+a narrow one — measuring to centres would make big enemies *harder* to sweep
+than small ones, which is backwards.
+
+The request carries nothing: no position, no direction, no target list. The
+server takes all three from the character. That is not caution for its own
+sake — unlike a fire request there is no ray to sanity-check an origin
+against, so a client-supplied one would let anyone sweep any room in the level
+from the drop point. An empty request makes the forgery impossible rather than
+merely detectable.
+
 ## Objectives
 
 OVERSEER issues one active objective at a time, chosen from a **whitelist** the model may pick from but never invent:

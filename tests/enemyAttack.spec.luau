@@ -446,3 +446,57 @@ t.describe("EnemyAttack — against the real roster", function()
 		end
 	end)
 end)
+
+--------------------------------------------------------------------------------
+-- Reach capped by visibility.
+--
+-- The Vault's fog ends at 45 studs and a Lancer's authored range is 55, so it
+-- opened fire from inside the fog -- from a place the renderer deliberately
+-- hides. Being hit by something you could never have seen reads as the game
+-- cheating rather than as a threat you misplayed, and it was reported that way
+-- from play: "the ranged guys shoot from very far away".
+--------------------------------------------------------------------------------
+
+t.describe("sim/EnemyAttack effective range", function()
+	local EnemyAttack_ = require("../src/shared/core/sim/EnemyAttack")
+
+	t.it("caps reach at what the attacker's zone allows", function()
+		-- Lancer 55, Vault fog 45 at 0.8 -> 36.
+		expect(EnemyAttack_.effectiveRange(55, 36)).toEqual(36)
+	end)
+
+	t.it("never widens a kind's authored range", function()
+		-- The Perimeter is visible to 180 studs; a Sentry still only reaches 45.
+		expect(EnemyAttack_.effectiveRange(45, 144)).toEqual(45)
+	end)
+
+	t.it("falls back to the authored range when visibility is unknown", function()
+		-- Outside every module -- there is no zone, so there is no fog rule to
+		-- apply, and the kind's own stats stand.
+		expect(EnemyAttack_.effectiveRange(55, nil)).toEqual(55)
+	end)
+
+	t.it("survives a nonsense cap", function()
+		expect(EnemyAttack_.effectiveRange(55, 0 / 0)).toEqual(55)
+		expect(EnemyAttack_.effectiveRange(55, -10)).toEqual(0)
+	end)
+
+	t.it("keeps every ranged kind inside the darkest zone's visibility", function()
+		-- The property that matters, checked against the real config rather
+		-- than a fixture: in the zone with the shortest sight line, nothing may
+		-- outreach it.
+		local Enemies = require("../src/shared/config/Enemies")
+		local Zones = require("../src/shared/config/Zones")
+		local Combat = require("../src/shared/config/Combat")
+
+		local darkest = math.huge
+		for _, zone in Zones :: any do
+			darkest = math.min(darkest, zone.lighting.fogEnd)
+		end
+		local cap = darkest * Combat.ATTACK_VISIBILITY_FRACTION
+
+		for _, config in Enemies :: any do
+			expect(EnemyAttack_.effectiveRange(config.atkRange, cap) <= cap + 1e-9).toBeTruthy()
+		end
+	end)
+end)

@@ -63,6 +63,7 @@ local CUES: { [string]: Cue } = {
 	enemyShot = { assetId = "", volume = 0.5, jitter = 0.08, minInterval = 0.05, positional = true, rollOffMaxDistance = 140 },
 	enemyDeath = { assetId = "", volume = 0.55, jitter = 0.10, minInterval = 0.06, positional = true, rollOffMaxDistance = 100 },
 
+	meleeSwing = { assetId = "", volume = 0.5, jitter = 0.06, minInterval = 0.2, positional = true, rollOffMaxDistance = 70 },
 	lootPickup = { assetId = "", volume = 0.4, jitter = 0.05, minInterval = 0.1, positional = false, rollOffMaxDistance = 30 },
 	padOpen = { assetId = "", volume = 0.6, jitter = 0, minInterval = 1.0, positional = false, rollOffMaxDistance = 200 },
 	runEnd = { assetId = "", volume = 0.6, jitter = 0, minInterval = 2.0, positional = false, rollOffMaxDistance = 200 },
