@@ -133,13 +133,22 @@ default, never set by this project), its default ~1 HP/s
 regeneration, and a twelve-minute run — so forty damage cost forty seconds of
 walking it off, and one bad room was unrecoverable rather than expensive.
 
-**[G] holds a 2.5-second channel and restores 45 HP. Two charges, and they do
-not refill.** The shape preserves the run's tension instead of removing it. A
-regenerating heal turns every fight into attrition the player wins by waiting;
-finite charges make "do I burn one here" a real question, which is the same
-question the whole game is about. Two charges against a 100-point bar roughly
-doubles survivable damage — enough that a mistake is survivable, not enough to
-stand and trade.
+**[G] holds a 1.6-second channel and restores full health. Two charges, and
+they do not refill.** The shape preserves the run's tension instead of removing
+it. A regenerating heal turns every fight into attrition the player wins by
+waiting; finite charges make "do I burn one here" a real question, which is the
+same question the whole game is about.
+
+The heal is to full rather than a fixed number of points because a fixed heal
+made a charge worth less the healthier you were, so the optimal play was to
+walk around hurt waiting for one to be worth spending. Full heals move the
+decision to *when*, and make the scarcity legible: two charges is two mistakes.
+That also makes `charges` the only limit on healing in the game, which is why
+it stays at two.
+
+Health arrives continuously across the channel against `progress²` rather than
+all at the end, so the bar moves from the first frame — but the final third
+carries more than the first two thirds combined, so finishing still matters.
 
 **Moving cancels it, taking damage cancels it, and the charge is not
 refunded.** Refunding would make a cancelled channel free, so the correct play

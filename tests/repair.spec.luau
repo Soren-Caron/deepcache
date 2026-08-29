@@ -13,7 +13,6 @@ local Repair = require("../src/shared/core/sim/Repair")
 
 local P: Repair.Params = {
 	charges = 2,
-	healAmount = 40,
 	channelSeconds = 2.0,
 }
 
@@ -104,7 +103,10 @@ t.describe("sim/Repair channelling", function()
 		expect(Repair.healedFraction(9)).toEqual(1)
 	end)
 
-	t.it("never pays more than the full heal across a channel", function()
+	t.it("pays exactly the deficit across a channel, no more", function()
+		-- Also pins the contract the server adapter depends on: the deltas sum
+		-- to the whole heal. Banking only the completing tick's delta -- which
+		-- the adapter did -- pays a few percent of it.
 		local s = Repair.new(P)
 		Repair.begin(s, 100, 10, 100, P)
 		local total = 0
@@ -112,7 +114,21 @@ t.describe("sim/Repair channelling", function()
 			local _, heal = Repair.collect(s, 100 + step * 0.1, P)
 			total += heal
 		end
-		expect(total).approx(P.healAmount, 1e-6)
+		expect(total).approx(90, 1e-6)
+	end)
+
+	t.it("pays a small slice on the completing tick when polled often", function()
+		-- The shape of the adapter bug, stated directly: at a realistic tick
+		-- rate the final delta is a rounding error next to the whole heal, so a
+		-- caller that applies only `done` deltas heals almost nothing.
+		local s = Repair.new(P)
+		Repair.begin(s, 100, 10, 100, P)
+		local last = 0
+		for step = 1, 40 do
+			local _, heal = Repair.collect(s, 100 + step * 0.05, P)
+			last = heal
+		end
+		expect(last < 90 * 0.1).toBeTruthy()
 	end)
 
 	t.it("keeps what it already paid when interrupted", function()
@@ -123,7 +139,7 @@ t.describe("sim/Repair channelling", function()
 		local _, paid = Repair.collect(s, 101, P)
 		Repair.cancel(s)
 		expect(paid > 0).toBeTruthy()
-		expect(paid < P.healAmount).toBeTruthy()
+		expect(paid < 50).toBeTruthy()
 		expect(s.chargesLeft).toEqual(1)
 	end)
 
@@ -133,8 +149,30 @@ t.describe("sim/Repair channelling", function()
 		local done, heal = Repair.collect(s, 102, P)
 		expect(done).toBeTruthy()
 		-- Nothing collected in between, so the whole heal arrives in one delta.
-		expect(heal).approx(P.healAmount, 1e-9)
+		expect(heal).approx(50, 1e-9)
 		expect(Repair.isChannelling(s)).toBeFalsy()
+	end)
+
+	t.it("heals to full from any deficit", function()
+		-- The charge is the cost, not the number of points. A player on 5 HP
+		-- and a player on 95 HP both get a full bar out of one charge, so
+		-- nobody is rewarded for walking around hurt to make one worth more.
+		for _, hp in { 5, 50, 95, 149 } do
+			local s = Repair.new(P)
+			Repair.begin(s, 100, hp, 150, P)
+			local _, heal = Repair.collect(s, 102, P)
+			expect(hp + heal).approx(150, 1e-9)
+		end
+	end)
+
+	t.it("does not grow to cover damage taken mid-channel", function()
+		-- The deficit is fixed when the channel begins. Otherwise being hit
+		-- during a repair would be free, and the interrupt rule is what makes
+		-- the channel a commitment.
+		local s = Repair.new(P)
+		Repair.begin(s, 100, 120, 150, P)
+		local _, heal = Repair.collect(s, 102, P)
+		expect(heal).approx(30, 1e-9)
 	end)
 
 	t.it("cannot be collected twice off one charge", function()
@@ -203,9 +241,10 @@ t.describe("config/Repair", function()
 	local RepairConfig = require("../src/shared/config/Repair")
 
 	t.it("cannot fully undo a run's worth of damage", function()
-		-- Finite by design: charges times heal must not exceed a couple of
-		-- full health bars, or attrition stops mattering.
-		expect(RepairConfig.charges * RepairConfig.healAmount <= 200).toBeTruthy()
+		-- Each charge is now a full heal, so `charges` is the only thing left
+		-- holding healing in check -- this bound is doing all the work the old
+		-- charges-times-points one used to share.
+		expect(RepairConfig.charges <= 2).toBeTruthy()
 	end)
 
 	t.it("costs long enough to be a commitment", function()

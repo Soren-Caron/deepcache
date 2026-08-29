@@ -1,14 +1,18 @@
 --!strict
 --[[ Field repair. Pure data, per CLAUDE.md -- no functions, no requires.
 
-	Sized against the damage the roster actually deals. A Hauler hits for 30
-	and a Warden for 22, so a 45-point repair is worth roughly a Hauler swing
-	and a half -- enough to survive a mistake, not enough to stand in a fight.
+	A completed repair restores **full health**, whatever the deficit. There is
+	no heal-size tunable here any more: the charge is the whole cost.
 
-	Two charges, not refilling, is the balance decision. Across a twelve-minute
-	run that is 90 points of healing against a 100-point health bar: it roughly
-	doubles your survivable damage, which turns a single bad room from fatal
-	into expensive, and still leaves attrition as the thing that ends runs.
+	That makes `charges` the only thing holding healing in check, so it has to
+	stay small. Two full heals across a twelve-minute run means the run can
+	survive three near-deaths and no more, and it keeps attrition as the thing
+	that ends runs. Raising it to three or four does not make the game a bit
+	easier -- it removes the pressure entirely.
+
+	The earlier fixed 45-point heal was dropped because it made a charge worth
+	less the healthier you were, so the correct play was to walk around hurt
+	waiting for the value to be there.
 
 	`channelSeconds` sits deliberately under the sweep's 3.5s cooldown, so the
 	intended sequence -- sweep to make space, then heal in it -- is possible
@@ -17,10 +21,9 @@
 
 local Repair = {}
 
---- Charges at the start of a run. They do not refill.
+--- Charges at the start of a run. They do not refill. The only limit on
+--- healing, now that each one is a full heal.
 Repair.charges = 2
-
-Repair.healAmount = 45
 
 --- Seconds of standing still. Taking damage cancels it and the charge is gone.
 ---

@@ -6,8 +6,8 @@
 
 	**Health is applied here and only here.** The client asks to start and
 	watches a bar; it never tells the server how much it healed, for the same
-	reason it never reports its own HP. A client trusted to say "I repaired 45"
-	would say 100.
+	reason it never reports its own HP. A client trusted to say how much it
+	repaired would say "to full", every tick.
 
 	The interrupt is driven from `HealthChanged` rather than polled, because
 	the window that matters is small: a hit landing 40 ms before the channel
@@ -28,7 +28,6 @@ local RepairService = {}
 
 local PARAMS: Repair.Params = {
 	charges = RepairConfig.charges,
-	healAmount = RepairConfig.healAmount,
 	channelSeconds = RepairConfig.channelSeconds,
 }
 
@@ -36,6 +35,10 @@ type Entry = {
 	state: Repair.State,
 	connection: RBXScriptConnection?,
 	lastHealth: number,
+	--- Health this channel has actually put on the Humanoid, for telemetry.
+	--- Not derivable from the completing tick's delta, since the payout arrives
+	--- across every tick of the channel.
+	channelHealed: number,
 }
 
 local tracked: { [Player]: Entry } = {}
@@ -61,7 +64,8 @@ local function entryFor(player: Player): Entry
 	if existing then
 		return existing
 	end
-	local created: Entry = { state = Repair.new(PARAMS), connection = nil, lastHealth = 0 }
+	local created: Entry =
+		{ state = Repair.new(PARAMS), connection = nil, lastHealth = 0, channelHealed = 0 }
 	tracked[player] = created
 	return created
 end
@@ -94,7 +98,11 @@ local function interrupt(player: Player, reason: string)
 	if Repair.cancel(entry.state) then
 		metrics.interrupted += 1
 		stopWatching(entry)
-		TelemetryService.emit("repair.interrupted", { reason = reason }, player.UserId)
+		TelemetryService.emit("repair.interrupted", {
+			reason = reason,
+			-- Non-zero by design: an interrupted channel keeps what it paid.
+			healed = math.floor(entry.channelHealed),
+		}, player.UserId)
 		push(player)
 	end
 end
@@ -122,6 +130,7 @@ function RepairService.begin(player: Player): (boolean, string?)
 
 	metrics.started += 1
 	entry.lastHealth = humanoid.Health
+	entry.channelHealed = 0
 
 	-- Any drop in health cancels it. Watched rather than polled: a hit landing
 	-- 40ms before completion must interrupt, and a 20Hz poll would let a fifth
@@ -158,21 +167,30 @@ function RepairService.step(_tick: number, _dt: number)
 		end
 
 		local done, heal = Repair.collect(entry.state, now, PARAMS)
+
+		-- Applied every tick, not only on the completing one. `collect` returns
+		-- the slice owed *since the last call*, so discarding the partial
+		-- deltas and banking only the final one paid about 3 HP of 45: at 20Hz
+		-- across a 1.6s channel the last tick is a thirty-second of the curve.
+		if heal > 0 then
+			-- Clamped so a repair cannot overheal, and `lastHealth` refreshed
+			-- straight after so the watcher does not read our own heal as damage.
+			local before = humanoid.Health
+			humanoid.Health = math.min(humanoid.MaxHealth, before + heal)
+			local applied = humanoid.Health - before
+			entry.lastHealth = humanoid.Health
+			entry.channelHealed += applied
+			metrics.healed += applied
+		end
+
 		if not done then
 			continue
 		end
 
 		stopWatching(entry)
-		-- Clamped so a repair cannot overheal, and applied before `lastHealth`
-		-- is refreshed so the watcher does not read our own heal as damage.
-		local before = humanoid.Health
-		humanoid.Health = math.min(humanoid.MaxHealth, before + heal)
-		entry.lastHealth = humanoid.Health
-
 		metrics.completed += 1
-		metrics.healed += humanoid.Health - before
 		TelemetryService.emit("repair.complete", {
-			healed = math.floor(humanoid.Health - before),
+			healed = math.floor(entry.channelHealed),
 			chargesLeft = entry.state.chargesLeft,
 		}, player.UserId)
 		push(player)
@@ -236,7 +254,6 @@ function RepairService.getMetrics(): { [string]: any }
 		refused = metrics.refused,
 		channellingNow = live,
 		charges = RepairConfig.charges,
-		healAmount = RepairConfig.healAmount,
 		channelSeconds = RepairConfig.channelSeconds,
 	}
 end

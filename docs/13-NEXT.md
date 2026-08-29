@@ -193,13 +193,30 @@ default regeneration, and no item, ability or pickup anywhere in `src/`. Forty
 damage cost forty seconds of walking it off, which is a large part of why a run
 ended in 59 seconds.
 
-**[G] now holds a 2.5s channel for 45 HP, two charges, no refill.** Moving or
-taking damage cancels it and the charge is *not* refunded — refunding would make
-cancelling free, so the right play would be to start one on every hit and cancel
-it. Verified: HP 40 with a real key press healed exactly 45.0 (`completed=1`);
-a hit mid-channel gave `interrupted=1` with `completed` unchanged and no health
-applied; and the HUD read `[G]x0` afterwards, confirming both charges were spent
-by one completion and one interrupt.
+**[G] now holds a 1.6s channel for a full heal, two charges, no refill.** Moving
+or taking damage cancels it and the charge is *not* refunded — refunding would
+make cancelling free, so the right play would be to start one on every hit and
+cancel it. Verified at the original 2.5s/45 HP shape: HP 40 with a real key press
+healed exactly 45.0 (`completed=1`); a hit mid-channel gave `interrupted=1` with
+`completed` unchanged and no health applied; and the HUD read `[G]x0` afterwards,
+confirming both charges were spent by one completion and one interrupt.
+
+Two changes since, both from the same session:
+
+**Payout is continuous, and the adapter was dropping it.** `Repair.collect`
+returns the health owed *since the last call*, and `RepairService.step` applied
+it only on the tick where the channel completed — `if not done then continue
+end` — throwing every earlier slice away. At 20 Hz across a 1.6s channel that
+final slice is about a thirtieth of the curve, so a repair paid roughly 3 HP of
+45 and still spent the charge. The verification above predates the accelerating
+curve, so it certified a payout shape that no longer existed by the time the
+bug landed. `core/sim/Repair` now says in the `collect` docstring that every
+delta must be applied, and two specs pin it: the deltas sum to the whole heal,
+and the completing delta on its own is under a tenth of it.
+
+**The heal is now to full**, so `healAmount` is gone from `config/Repair` — a
+fixed heal made a charge worth less the healthier you were, which rewarded
+walking around hurt. `charges` is now the only thing limiting healing.
 
 The channel sits under the sweep's 3.5s cooldown on purpose, so sweep-then-heal
 is possible once per cooldown rather than freely.
@@ -375,6 +392,7 @@ The numbers were set to clear the guards in `tests/enemyAttack.spec.luau`
 | Knob | Current | Note |
 |---|---|---|
 | Player HP | **150** | Was 100 (Roblox's default, never set). No armour, no mitigation, ~1 HP/s regen, plus 2 repair charges |
+| Repair | **2 × full heal** | Was 2 × 45. Effective pool is now 450 across a run if all three bars are used, so this is the largest untested lever in the table |
 | Sentry cooldown | 0.75 s | Was 0.35 (31.4 dps); may still be high in packs |
 | Hauler `capPerWave` | 3 | Was 4; a 30-damage swing means 4 hits is a kill |
 | Wave interval | 12 s | A *minimum*, not a guarantee — gated on outstanding budget |
