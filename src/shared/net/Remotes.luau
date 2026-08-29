@@ -65,6 +65,15 @@ local DECLARATIONS: { [string]: RemoteKind } = {
 	--- mid-run, or twice in a frame, is refused rather than trusted.
 	RedeployRequest = "Reliable",
 
+	--- Client -> server. Start (or cancel) a field repair. The client asks and
+	--- watches a bar; it never says how much it healed, for the same reason it
+	--- never reports its own HP.
+	RepairRequest = "Reliable",
+	--- Server -> client. Charges left and whether a channel is running, so the
+	--- HUD can show both. Reliable: a lost update leaves the readout claiming a
+	--- charge the player no longer has.
+	RepairState = "Reliable",
+
 	--- Client -> server. Asks to swing the melee sweep. Reliable: a dropped
 	--- request leaves the player on cooldown in their own HUD for an attack the
 	--- server never resolved, which reads as the ability being broken.

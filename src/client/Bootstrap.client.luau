@@ -22,6 +22,7 @@ local RagdollController = require("./controllers/RagdollController")
 local SprintController = require("./controllers/SprintController")
 local AudioController = require("./controllers/AudioController")
 local MeleeController = require("./controllers/MeleeController")
+local RepairController = require("./controllers/RepairController")
 
 local function main()
 	EntityRenderer.start()
@@ -56,6 +57,9 @@ local function main()
 		AudioController.play("meleeSwing", payload.from)
 	end)
 	MeleeController.start()
+
+	RepairController.setHooks({ onChanged = HudController.setRepair })
+	RepairController.start()
 
 	-- Which weapon is live, mirrored here so the fire cue can be per-weapon.
 	-- Four weapons that sound identical read as one weapon.

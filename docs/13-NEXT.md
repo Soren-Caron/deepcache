@@ -144,6 +144,34 @@ same document is wrong.
 
 ## 3. Known bugs and rough edges
 
+~~**Enemies died into a grey crate.**~~ Reported as "when I sweep kill enemies
+it spawns these in their place", and it was the same drift as the hitbox bug.
+`RagdollController` was written at M7-4 when entities really were boxes, so the
+corpse was a hardcoded 2x2x3 slate part in a fixed brown-grey. The R6 rigs
+landed later in `856ac8b` and this was never revisited — a Skitter and a Warden
+both died into the same crate.
+
+Corpses are now sized from the kind's own `hitboxRadius` and coloured from the
+same palette the renderer uses. Verified by firing one `Ragdoll` payload per
+kind: Skitter 2.40x1.68x3.24 red, Lancer 3.00x2.10x4.05 green, Warden
+6.00x4.20x8.10 violet.
+
+~~**No healing mechanism at all.**~~ There genuinely was none: 100 HP, Roblox's
+default regeneration, and no item, ability or pickup anywhere in `src/`. Forty
+damage cost forty seconds of walking it off, which is a large part of why a run
+ended in 59 seconds.
+
+**[G] now holds a 2.5s channel for 45 HP, two charges, no refill.** Moving or
+taking damage cancels it and the charge is *not* refunded — refunding would make
+cancelling free, so the right play would be to start one on every hit and cancel
+it. Verified: HP 40 with a real key press healed exactly 45.0 (`completed=1`);
+a hit mid-channel gave `interrupted=1` with `completed` unchanged and no health
+applied; and the HUD read `[G]x0` afterwards, confirming both charges were spent
+by one completion and one interrupt.
+
+The channel sits under the sweep's 3.5s cooldown on purpose, so sweep-then-heal
+is possible once per cooldown rather than freely.
+
 ~~**Ranged enemies attack from outside the fog.**~~ Reported from play as "the
 ranged guys shoot from very far away", and it was real. Enemy reach is authored
 per kind while visibility is authored per zone, and nothing reconciled them:

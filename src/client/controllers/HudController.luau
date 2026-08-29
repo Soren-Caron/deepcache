@@ -82,6 +82,9 @@ local staminaBack: Frame
 local meleeBar: Frame
 local meleeBack: Frame
 local meleeReadiness = 1
+local repairCharges = 0
+local repairProgress = 0
+local repairing = false
 local staminaFraction = 1
 local staminaExhausted = false
 
@@ -262,8 +265,11 @@ local function render()
 		local left = math.max(reloadEndsAt - os.clock(), 0)
 		vitalsLabel.Text = string.format("HP %3d   %s RELOADING %.1fs", hp, currentWeapon, left)
 		vitalsLabel.TextColor3 = ACCENT
+	elseif repairing then
+		vitalsLabel.Text = string.format("HP %3d   REPAIRING %.0f%%", hp, repairProgress * 100)
+		vitalsLabel.TextColor3 = GOOD
 	else
-		vitalsLabel.Text = string.format("HP %3d   %s %d", hp, currentWeapon, currentAmmo)
+		vitalsLabel.Text = string.format("HP %3d   %s %d   [G]x%d", hp, currentWeapon, currentAmmo, repairCharges)
 		vitalsLabel.TextColor3 = if hp <= 25 then ALERT elseif currentAmmo == 0 then ALERT else DIM
 	end
 
@@ -342,7 +348,7 @@ local function render()
 	if reloadingWeapon == nil and currentAmmo == 0 then
 		hint = "[R]  RELOAD"
 	elseif now < hintUntil then
-		hint = "[1-4] weapons   [R] reload   [SHIFT] sprint   [F] sweep"
+		hint = "[1-4] weapons  [R] reload  [SHIFT] sprint  [F] sweep  [G] repair"
 	end
 	hintLabel.Text = hint
 	hintLabel.Visible = hint ~= "" and not latest.complete
@@ -461,6 +467,17 @@ end
 --- exists.
 function HudController.setMeleeCooldown(fraction: number, _ready: boolean)
 	meleeReadiness = fraction
+end
+
+--- Pushed by RepairController every frame.
+---
+--- Charges ride the vitals line rather than getting their own element: a
+--- resource you have two of, all run, does not need a bar -- it needs a
+--- number next to the health it restores.
+function HudController.setRepair(chargesLeft: number, progress: number, isRepairing: boolean)
+	repairCharges = chargesLeft
+	repairProgress = progress
+	repairing = isRepairing
 end
 
 --- Pushed by SprintController every frame it ticks.

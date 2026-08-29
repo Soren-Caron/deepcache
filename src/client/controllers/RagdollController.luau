@@ -29,13 +29,50 @@ local PhysicsService = game:GetService("PhysicsService")
 local RunService = game:GetService("RunService")
 local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 
+local EnemiesConfig = require(Shared.config.Enemies)
 local RagdollPool = require(Shared.core.anim.RagdollPool)
 local Remotes = require(Shared.net.Remotes)
 
 local RagdollController = {}
 
 local COLLISION_GROUP = "DeepcacheRagdoll"
-local PART_SIZE = Vector3.new(2, 2, 3)
+--- Fallback corpse size, for a kind the client does not recognise.
+---
+--- This used to be *the* size, for every kind, because M7-4 was written when
+--- entities really were 2x3 boxes. The R6 rigs landed later (856ac8b) and this
+--- was never revisited, so a Skitter and a Warden both died into the same grey
+--- crate -- reported from play as "it spawns these in their place". The body
+--- is now sized and coloured from the kind that died; see `corpseLook`.
+local FALLBACK_SIZE = Vector3.new(2, 2, 3)
+
+--- Body colours, matching `EntityRenderer.COLORS`. Duplicated rather than
+--- imported because requiring the renderer from here would make the corpse
+--- system depend on the live-entity system for one table -- but they are the
+--- same numbers on purpose, and a corpse in a different colour from the enemy
+--- reads as a different object entirely.
+local CORPSE_COLOURS: { [string]: Color3 } = {
+	Skitter = Color3.fromRGB(200, 90, 70),
+	Sentry = Color3.fromRGB(90, 130, 200),
+	Hauler = Color3.fromRGB(150, 120, 60),
+	Lancer = Color3.fromRGB(120, 190, 130),
+	Warden = Color3.fromRGB(190, 120, 210),
+	Reclaimer = Color3.fromRGB(230, 60, 60),
+}
+
+--- Size and colour of the body a `kind` leaves behind.
+---
+--- Sized from the same `hitboxRadius` the server shoots against and the
+--- renderer stands the rig on, so the three cannot drift apart again. Squatter
+--- than the living silhouette because it is lying down.
+local function corpseLook(kind: string?): (Vector3, Color3)
+	local config = if kind ~= nil then (EnemiesConfig :: any)[kind] else nil
+	if config == nil then
+		return FALLBACK_SIZE, Color3.fromRGB(90, 80, 76)
+	end
+	local width = config.hitboxRadius * 1.5
+	return Vector3.new(width, width * 0.7, width * 1.35),
+		CORPSE_COLOURS[kind] or Color3.fromRGB(90, 80, 76)
+end
 --- Scales the ledger's damage number into a physics impulse. Tuned so an
 --- ordinary killing blow tips a body over rather than launching it.
 local IMPULSE_SCALE = 6
@@ -80,7 +117,7 @@ local function rigFor(slotIndex: number): BasePart
 	end
 	local part = Instance.new("Part")
 	part.Name = `Ragdoll_{slotIndex}`
-	part.Size = PART_SIZE
+	part.Size = FALLBACK_SIZE
 	part.Anchored = true
 	part.CanCollide = false
 	part.CanQuery = false
@@ -127,6 +164,11 @@ local function onRagdoll(payload: any)
 	end
 
 	local part = rigFor(slot.index)
+	-- Slots are pooled and reused across kinds, so the look has to be reapplied
+	-- per death rather than set once at creation.
+	local size, colour = corpseLook(payload.kind)
+	part.Size = size
+	part.Color = colour
 	part.CFrame = CFrame.new(deathPos) * CFrame.Angles(math.random() * 0.4, math.random() * 6.28, math.random() * 0.4)
 	part.Transparency = 0
 	part.CanCollide = true

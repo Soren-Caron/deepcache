@@ -9,7 +9,9 @@
 
 	Phase order inside the tick is the other half of the contract:
 	spawn waves -> simulate -> record history -> resolve combat -> resolve
-	enemy strikes -> guard movement -> advance the run -> replicate. Waves come
+	enemy strikes -> settle repairs -> guard movement -> advance the run ->
+	replicate. Repairs settle after enemy strikes so a hit landing this tick
+	interrupts a channel before that channel can complete on the same tick. Waves come
 	first so an entity spawned this tick is stepped and recorded into history on
 	the same tick. Combat must resolve against history recorded this tick, and
 	enemy strikes after it so an entity killed this tick cannot swing back from
@@ -37,6 +39,7 @@ local ReplicationService = require("./services/ReplicationService")
 local CombatService = require("./services/CombatService")
 local EnemyCombatService = require("./services/EnemyCombatService")
 local MeleeService = require("./services/MeleeService")
+local RepairService = require("./services/RepairService")
 local MovementGuardService = require("./services/MovementGuardService")
 local DirectorService = require("./services/DirectorService")
 local WaveService = require("./services/WaveService")
@@ -102,6 +105,7 @@ local function restartRun(seed: number?): number
 
 	-- `start` calls LootService.populate, which clears the ground *and* every
 	-- carry, so a restart cannot bank loot picked up in the previous run.
+	RepairService.resetAll()
 	RunLifecycleService.start(seed or Rooms.defaultSeed)
 
 	-- Carry is now empty but the HUD's weight bar still shows the old number:
@@ -172,6 +176,7 @@ local function main()
 	CombatService.init()
 	MovementGuardService.init()
 	MeleeService.init()
+	RepairService.init()
 	LootService.init()
 	RunLifecycleService.init()
 
@@ -245,6 +250,7 @@ local function main()
 	-- Same predicate again: a dead or extracted player must not keep swinging
 	-- any more than they keep looting or soaking hits.
 	MeleeService.setActionPredicate(RunLifecycleService.isActive)
+	RepairService.setActionPredicate(RunLifecycleService.isActive)
 
 	-- Before `sim`, so an entity spawned this tick is stepped and recorded into
 	-- the rewind history on the same tick it appears. After replication it
@@ -256,6 +262,9 @@ local function main()
 	-- After `combat`, so an entity killed by a player this tick does not also
 	-- get to land a strike from beyond the grave.
 	TickService.addPhase("enemyCombat", EnemyCombatService.step)
+	-- After `enemyCombat`: a strike landing this tick must interrupt a repair
+	-- before that repair can complete on the same tick.
+	TickService.addPhase("repair", RepairService.step)
 	TickService.addPhase("movement", MovementGuardService.step)
 	-- After combat and movement: extraction and death must see this tick's
 	-- outcomes, or a player killed on the tick they reach a pad extracts anyway.
@@ -1094,6 +1103,7 @@ local function main()
 	Diagnostics.register("waveInfo", WaveService.describe)
 	Diagnostics.register("enemyCombatMetrics", EnemyCombatService.getMetrics)
 	Diagnostics.register("meleeMetrics", MeleeService.getMetrics)
+	Diagnostics.register("repairMetrics", RepairService.getMetrics)
 
 	-- Enemy damage acceptance: stand a player in a swarm and report what
 	-- actually lands. Reads HP directly rather than trusting the metrics
@@ -1479,7 +1489,7 @@ local function main()
 
 	print(
 		`[{Branding.gameName}] server up — tick {1 / 20}s, `
-			.. `phases: waves/sim/history/combat/enemyCombat/movement/run/replication`
+			.. `phases: waves/sim/history/combat/enemyCombat/repair/movement/run/replication`
 	)
 	print(
 		`[{Branding.gameName}] level seed {layout.seed} — {#layout.modules} modules `

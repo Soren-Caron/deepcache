@@ -126,6 +126,29 @@ Four, each a distinct engagement range and a distinct netcode profile:
 
 Ammo is server-authoritative; the client predicts the decrement and reconciles.
 
+### Field repair
+
+There was no healing at all until now: 100 HP, Roblox's default ~1 HP/s
+regeneration, and a twelve-minute run — so forty damage cost forty seconds of
+walking it off, and one bad room was unrecoverable rather than expensive.
+
+**[G] holds a 2.5-second channel and restores 45 HP. Two charges, and they do
+not refill.** The shape preserves the run's tension instead of removing it. A
+regenerating heal turns every fight into attrition the player wins by waiting;
+finite charges make "do I burn one here" a real question, which is the same
+question the whole game is about. Two charges against a 100-point bar roughly
+doubles survivable damage — enough that a mistake is survivable, not enough to
+stand and trade.
+
+**Moving cancels it, taking damage cancels it, and the charge is not
+refunded.** Refunding would make a cancelled channel free, so the correct play
+would be to start one every time you were hit and cancel it. Losing the charge
+means you commit.
+
+The channel is deliberately shorter than the sweep's cooldown, so the intended
+sequence — sweep to make space, heal in it — is possible once per cooldown
+rather than freely.
+
 ### The sweep
 
 Every weapon above is a ray, which leaves one hole in the fight: a Skitter
