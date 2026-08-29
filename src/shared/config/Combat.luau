@@ -7,6 +7,19 @@
 ]]
 
 return {
+	--- The player's health pool.
+	---
+	--- Roblox's Humanoid default is 100, which is what this was for every
+	--- milestone up to now -- not by decision, just by never being set. 150
+	--- against a roster that hits for 8 (Skitter) to 30 (Hauler) turns a bad
+	--- room from fatal into expensive, which is the same thing field repair
+	--- was added for and works with it rather than instead of it.
+	---
+	--- Applied to the Humanoid on spawn; nothing else in the game reads a
+	--- hardcoded 100, and the survivability guards in
+	--- `tests/enemyAttack.spec.luau` read this so the two cannot drift.
+	PLAYER_MAX_HEALTH = 150,
+
 	--- Fraction of a zone's visible distance that an enemy may attack from.
 	---
 	--- Enemy reach is capped at `fogEnd * this`. The Vault's fog ends at 45

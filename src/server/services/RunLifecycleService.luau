@@ -22,6 +22,7 @@ local AbTest = require(Shared.core.director.AbTest)
 local Run = require(Shared.core.sim.Run)
 local Types = require(Shared.core.Types)
 local Branding = require(Shared.config.Branding)
+local CombatConfig = require(Shared.config.Combat)
 local ZonesConfig = require(Shared.config.Zones)
 local Remotes = require(Shared.net.Remotes)
 
@@ -90,6 +91,12 @@ local function watchDeath(player: Player)
 		if humanoid == nil or not humanoid:IsA("Humanoid") then
 			return
 		end
+
+		-- The health pool, which Roblox otherwise leaves at its default 100.
+		-- Raising MaxHealth alone would leave the player spawning on a partly
+		-- empty bar, since Health does not follow it.
+		humanoid.MaxHealth = CombatConfig.PLAYER_MAX_HEALTH
+		humanoid.Health = humanoid.MaxHealth
 		local existing = diedConnections[player.UserId]
 		if existing then
 			existing:Disconnect()

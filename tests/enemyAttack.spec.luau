@@ -12,6 +12,7 @@ local expect = t.expect
 
 local EnemyAttack = require("../src/shared/core/sim/EnemyAttack")
 local Enemies = require("../src/shared/config/Enemies")
+local Combat = require("../src/shared/config/Combat")
 
 local STATS: { [string]: EnemyAttack.Stats } = {
 	Skitter = { dmg = 8, atkRange = 4, atkCooldown = 0.8 },
@@ -382,15 +383,20 @@ t.describe("EnemyAttack — against the real roster", function()
 	end)
 
 	t.it("a Skitter needs a plausible number of hits to drop a full-health player", function()
-		-- 100 HP against 8 damage is 13 hits at 0.8 s -- about 10 seconds of
+		-- 150 HP against 8 damage is 19 hits at 0.8 s -- about 15 seconds of
 		-- uninterrupted contact from a single Skitter. If this ever reads as 2
 		-- or 3, the config moved and the game became a one-shot.
-		local hits = math.ceil(100 / Enemies.Skitter.dmg)
-		expect(hits >= 8 and hits <= 20).toBeTruthy()
+		local hits = math.ceil(Combat.PLAYER_MAX_HEALTH / Enemies.Skitter.dmg)
+		expect(hits >= 8 and hits <= 28).toBeTruthy()
 	end)
 
 	-- docs/01 §Scaling -> Survivability records these targets and why.
-	local PLAYER_HP = 100
+	--
+	-- Read from config rather than written here. It used to be a literal 100,
+	-- matching Roblox's Humanoid default by coincidence rather than by
+	-- reference -- so raising the pool would have left these guards quietly
+	-- certifying a game that no longer existed.
+	local PLAYER_HP = Combat.PLAYER_MAX_HEALTH
 	local SIDEARM_DPS = 22 * 4.0
 	local CARBINE_DPS = 17 * 9.0
 	--- How many melee attackers physically fit around one player. A 2.5-stud

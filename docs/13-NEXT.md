@@ -374,7 +374,7 @@ The numbers were set to clear the guards in `tests/enemyAttack.spec.luau`
 
 | Knob | Current | Note |
 |---|---|---|
-| Player HP | 100 | No armour, no mitigation, ~1 HP/s regen |
+| Player HP | **150** | Was 100 (Roblox's default, never set). No armour, no mitigation, ~1 HP/s regen, plus 2 repair charges |
 | Sentry cooldown | 0.75 s | Was 0.35 (31.4 dps); may still be high in packs |
 | Hauler `capPerWave` | 3 | Was 4; a 30-damage swing means 4 hits is a kill |
 | Wave interval | 12 s | A *minimum*, not a guarantee — gated on outstanding budget |

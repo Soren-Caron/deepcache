@@ -15,7 +15,7 @@ return {
 		zones = { "Perimeter", "Processing", "Vault" }, capPerWave = 24,
 	},
 	-- Cooldown was 0.35 (31.4 dps). At capPerWave 6 that is 188 dps against a
-	-- 100 HP player -- a wave of five killed a stationary player in 0.64s while
+	-- 100 HP player (the pool at the time; now Combat.PLAYER_MAX_HEALTH) -- a wave of five killed a stationary player in 0.64s while
 	-- taking 7.4s to kill with a Sidearm. Area denial should make a sightline
 	-- expensive to cross, not make it fatal before you can react.
 	Sentry = {

@@ -128,7 +128,8 @@ Ammo is server-authoritative; the client predicts the decrement and reconciles.
 
 ### Field repair
 
-There was no healing at all until now: 100 HP, Roblox's default ~1 HP/s
+There was no healing at all until now: a 100 HP pool (Roblox's Humanoid
+default, never set by this project), its default ~1 HP/s
 regeneration, and a twelve-minute run — so forty damage cost forty seconds of
 walking it off, and one bad room was unrecoverable rather than expensive.
 

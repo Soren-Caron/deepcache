@@ -1,10 +1,12 @@
 --!strict
 --[[ Field repair: a channelled heal on a finite number of charges.
 
-	Until now there was no healing at all. A player had 100 HP, Roblox's
-	default 1 HP/s regeneration, and a twelve-minute run -- so forty damage
-	cost forty seconds of walking it off, and a bad thirty seconds in the
-	Perimeter was unrecoverable rather than expensive.
+	Until now there was no healing at all. A player had 100 HP -- Roblox's
+	Humanoid default, never set by this project -- its default 1 HP/s
+	regeneration, and a twelve-minute run, so forty damage cost forty seconds
+	of walking it off and a bad thirty seconds in the Perimeter was
+	unrecoverable rather than expensive. The pool is now
+	`Combat.PLAYER_MAX_HEALTH`.
 
 	The shape is chosen to keep the run's tension rather than remove it:
 
