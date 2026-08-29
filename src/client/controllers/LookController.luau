@@ -310,8 +310,43 @@ local function installDiagnostics()
 	bridge.Parent = player
 end
 
+--- The lighting that does not change with zone or threat.
+---
+--- Set once, here, because this file's header claims to be the only writer of
+--- `Lighting` and that claim is load-bearing -- the M7-5 note further up
+--- documents what happened when two owners fought over one property.
+--- `apply` owns everything the presets blend (tint, saturation, contrast,
+--- bloom, fog); this owns the stage those sit on and never touches them.
+---
+--- The values are what a sealed facility needs rather than what a Roblox place
+--- ships with. The default is mid-afternoon (`ClockTime` 14.5) with outdoor
+--- ambient at 0.27 -- correct for a baseplate, wrong for a level whose rooms
+--- now have lids on them: the sun was doing the lighting, and once the
+--- ceilings went on, every interior would have been lit by nothing but a
+--- generic grey ambient.
+local function applyBaseline()
+	-- Night, so the skybox stops pouring daylight through every doorway.
+	Lighting.ClockTime = 0
+	Lighting.GeographicLatitude = 0
+	Lighting.Brightness = 1
+	-- Low, and cool rather than neutral grey: the ceiling fixtures are meant to
+	-- be the reason you can see, so ambient only has to keep the shadows from
+	-- being pure black.
+	Lighting.Ambient = Color3.fromRGB(28, 30, 38)
+	Lighting.OutdoorAmbient = Color3.fromRGB(18, 20, 28)
+	Lighting.EnvironmentDiffuseScale = 0.25
+	Lighting.EnvironmentSpecularScale = 0.35
+	Lighting.GlobalShadows = true
+	-- Fog *colour* is baseline; fog distance belongs to the presets and is
+	-- written by `apply`. Splitting them this way means a zone transition
+	-- changes how far you can see without also changing what the haze is made
+	-- of, which would read as the room repainting itself.
+	Lighting.FogColor = Color3.fromRGB(16, 18, 26)
+end
+
 function LookController.start()
 	ensureEffects()
+	applyBaseline()
 	fromPreset = presetFor(DEFAULT_ZONE)
 	toPreset = presetFor(DEFAULT_ZONE)
 	transitionElapsed = LightingBlend.TRANSITION_SECONDS

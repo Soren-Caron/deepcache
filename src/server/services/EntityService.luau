@@ -10,6 +10,7 @@
 
 local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 
+local CombatConfig = require(Shared.config.Combat)
 local EnemiesConfig = require(Shared.config.Enemies)
 local NetcodeConfig = require(Shared.config.Netcode)
 local EntityState = require(Shared.core.sim.EntityState)
@@ -125,14 +126,17 @@ end
 
 --------------------------------------------------------------------------------
 
-local function nearestTarget(pos: Types.Vec3, targets: { Target }): Types.Vec3?
-	local best: Types.Vec3? = nil
+--- Returns the whole Target, not just its position: `EnemyAttack` needs to know
+--- *who* was chosen so a strike lands on the player the entity is facing rather
+--- than on whoever happens to be nearest when damage resolves.
+local function nearestTarget(pos: Types.Vec3, targets: { Target }): Target?
+	local best: Target? = nil
 	local bestDistance = math.huge
 	for _, target in targets do
 		local distance = Types.distance(pos, target.pos)
 		if distance < bestDistance then
 			bestDistance = distance
-			best = target.pos
+			best = target
 		end
 	end
 	return best
@@ -141,7 +145,7 @@ end
 --- The player carrying the most. Ties break by id so a replayed run picks the
 --- same victim; falling back to nearest keeps the Reclaimer useful before
 --- anyone has picked anything up.
-local function heaviestTarget(pos: Types.Vec3, targets: { Target }): Types.Vec3?
+local function heaviestTarget(pos: Types.Vec3, targets: { Target }): Target?
 	local best: Target? = nil
 	for _, target in targets do
 		local weight = target.weight or 0
@@ -152,7 +156,7 @@ local function heaviestTarget(pos: Types.Vec3, targets: { Target }): Types.Vec3?
 	if best == nil or (best.weight or 0) <= 0 then
 		return nearestTarget(pos, targets)
 	end
-	return best.pos
+	return best
 end
 
 --- Two points in the same room have no wall between them, so an entity may
@@ -261,22 +265,81 @@ function EntityService.step(tick: number, dt: number)
 		local behavior = config.behavior
 
 		-- HuntHeaviest goes for the biggest carry rather than the closest body.
-		local target = if behavior == "HuntHeaviest"
+		local chosen = if behavior == "HuntHeaviest"
 			then heaviestTarget(entity.pos, targets)
 			else nearestTarget(entity.pos, targets)
 
-		if target == nil then
+		if chosen == nil then
 			EntityState.transition(entity, "idle")
 			entity.vel = { x = 0, y = 0, z = 0 }
+			entity.targetId = nil
 			continue
 		end
 
+		-- Recorded so `EnemyAttack` strikes whoever this entity actually chose.
+		-- The field has existed on Types.Entity since M1 and was never assigned.
+		entity.targetId = chosen.id
+		local target = chosen.pos
+
 		local distance = Types.distance(entity.pos, target)
 
-		if distance <= config.atkRange then
+		-- Hoisted above the attack branch: an attacking crowd still needs to
+		-- unstack, so separation can no longer be exclusive to `move`.
+		local neighbours: { Types.Vec3 } = {}
+		for otherIndex, otherPos in positions do
+			if otherIndex ~= index then
+				table.insert(neighbours, otherPos)
+			end
+		end
+
+		--- How close this entity may get to the target's centre before it is
+		--- standing inside them. Also the floor below which the direction *to*
+		--- the target stops being a usable facing: at half a stud, sub-stud
+		--- movement swings that angle through tens of degrees per tick.
+		---
+		--- **Clamped inside attack range**, which the raw sum is not: a Skitter
+		--- wants 1.6 + 2.5 = 4.1 studs of space but only reaches 4.0, so it
+		--- shoved itself out of its own attack range every frame, dropped to
+		--- `move`, walked back in, and shoved itself out again. Reported as
+		--- enemies moving back and forth on the spot, and that is exactly what
+		--- it was. A Hauler had the same bug with 0.1 studs of margin.
+		local personalSpace = math.min(
+			entity.hitboxRadius + CombatConfig.PLAYER_RADIUS,
+			config.atkRange * CombatConfig.STANDOFF_FRACTION
+		)
+
+		--- Hysteresis on the attack band. Without it an entity travelling at
+		--- 22 studs/s covers 1.1 studs per tick and overshoots the boundary,
+		--- so it flickers between `move` and `attack` even once the standoff
+		--- fits -- and each flip swaps a full-speed seek for a slow shuffle,
+		--- which is visible as a stutter.
+		local engaged = entity.state == "attack"
+		local engageAt = config.atkRange
+		local disengageAt = config.atkRange * CombatConfig.DISENGAGE_FRACTION
+
+		local function faceTarget()
+			local desired = Steering.facingYaw(Types.subVec3(target, entity.pos), entity.yaw, personalSpace)
+			entity.yaw = Steering.slewYaw(entity.yaw, desired, config.turnRate, dt)
+		end
+
+		if (not engaged and distance <= engageAt) or (engaged and distance <= disengageAt) then
 			EntityState.transition(entity, "attack")
-			entity.vel = { x = 0, y = 0, z = 0 }
-			entity.yaw = Steering.facingYaw(Types.subVec3(target, entity.pos), entity.yaw)
+
+			-- Previously this zeroed velocity and skipped steering entirely, so
+			-- a crowd a moving player walked into stayed interpenetrated
+			-- forever -- nothing was left to push it apart. An attacker still
+			-- gets to adjust its footing, at a fraction of its speed.
+			local separate =
+				Steering.separate(entity.pos, neighbours, entity.hitboxRadius * CombatConfig.ATTACK_SEPARATION_FACTOR)
+			local offTarget = Steering.separate(entity.pos, { target }, personalSpace)
+			local shuffle = Steering.combine({
+				{ force = Types.scaleVec3(separate, config.speed), weight = 0.8 },
+				{ force = Types.scaleVec3(offTarget, config.speed), weight = 1.0 },
+			}, config.speed * CombatConfig.ATTACK_SHUFFLE_FRACTION)
+
+			entity.vel = shuffle
+			entity.pos = Types.addVec3(entity.pos, Types.scaleVec3(shuffle, dt))
+			faceTarget()
 			continue
 		end
 
@@ -286,18 +349,11 @@ function EntityService.step(tick: number, dt: number)
 		if behavior == "Static" then
 			EntityState.transition(entity, "idle")
 			entity.vel = { x = 0, y = 0, z = 0 }
-			entity.yaw = Steering.facingYaw(Types.subVec3(target, entity.pos), entity.yaw)
+			faceTarget()
 			continue
 		end
 
 		EntityState.transition(entity, "move")
-
-		local neighbours: { Types.Vec3 } = {}
-		for otherIndex, otherPos in positions do
-			if otherIndex ~= index then
-				table.insert(neighbours, otherPos)
-			end
-		end
 
 		-- Route around walls, then steer the last few studs.
 		local waypoint = routedTarget(entity, target)
@@ -305,11 +361,25 @@ function EntityService.step(tick: number, dt: number)
 		-- A Lancer holds standoff against the target, but only once it can see
 		-- it. Applying keepDistance to a doorway it is walking toward would
 		-- make it back away from its own route and deadlock in the corridor.
+		-- Arrival damping. A Skitter closes at 22 studs/s, which is 1.1 studs
+		-- per tick -- it slams straight through the attack boundary, and the
+		-- crowd's mutual separation then pushes it back out, so it hunts in and
+		-- out around the player instead of settling. Easing the last few studs
+		-- is what makes an approach stop rather than bounce.
+		local approachSpeed = config.speed
+		local band = config.atkRange * CombatConfig.ARRIVAL_BAND
+		if band > 1e-6 and distance < config.atkRange + band then
+			local nearness = math.clamp((distance - config.atkRange) / band, 0, 1)
+			approachSpeed = config.speed
+				* (CombatConfig.ARRIVAL_MIN_FRACTION
+					+ (1 - CombatConfig.ARRIVAL_MIN_FRACTION) * nearness)
+		end
+
 		local seek
 		if behavior == "KeepDistance" and sameRoom(entity.pos, target) then
-			seek = Steering.keepDistance(entity.pos, target, config.preferredDistance or 40, config.speed)
+			seek = Steering.keepDistance(entity.pos, target, config.preferredDistance or 40, approachSpeed)
 		else
-			seek = Steering.seek(entity.pos, waypoint, config.speed)
+			seek = Steering.seek(entity.pos, waypoint, approachSpeed)
 		end
 
 		local separate = Steering.separate(entity.pos, neighbours, entity.hitboxRadius * 2.5)
@@ -321,7 +391,15 @@ function EntityService.step(tick: number, dt: number)
 
 		entity.vel = velocity
 		entity.pos = Types.addVec3(entity.pos, Types.scaleVec3(velocity, dt))
-		entity.yaw = Steering.facingYaw(velocity, entity.yaw)
+		-- Rate-limited like the others: a seek force that reverses between
+		-- ticks (rounding a corner, or separation winning briefly) would
+		-- otherwise snap the entity through 180 degrees in one frame.
+		entity.yaw = Steering.slewYaw(
+			entity.yaw,
+			Steering.facingYaw(velocity, entity.yaw),
+			config.turnRate,
+			dt
+		)
 	end
 
 	for _, id in reap do

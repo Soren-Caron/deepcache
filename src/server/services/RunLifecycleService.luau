@@ -22,6 +22,7 @@ local AbTest = require(Shared.core.director.AbTest)
 local Run = require(Shared.core.sim.Run)
 local Types = require(Shared.core.Types)
 local Branding = require(Shared.config.Branding)
+local CombatConfig = require(Shared.config.Combat)
 local ZonesConfig = require(Shared.config.Zones)
 local Remotes = require(Shared.net.Remotes)
 
@@ -37,9 +38,21 @@ local PAD_RADIUS = 12
 --- Client state pushes per second. The HUD needs the clock, not every tick.
 local PUSH_INTERVAL = 1.0
 
+--- How long after a run ends before a redeploy is honoured. Long enough that
+--- the summary is readable, short enough that nobody is waiting on it.
+local REDEPLOY_DEBOUNCE = 2.0
+
 local state: Run.RunState? = nil
 local schedule: Run.PadSchedule = {}
 local sincePush = 0
+--- Seconds since the run completed, for the redeploy debounce. Counted rather
+--- than read off a clock so the rule stays testable in `core/sim/Run`.
+local sinceComplete = 0
+--- Set by Bootstrap: how to actually start a fresh run. Injected because
+--- restarting touches waves, entities and enemy cooldowns, and this service
+--- owns none of those -- reaching into them from here would make the run
+--- lifecycle depend on half the server.
+local restarter: ((seed: number?) -> ())? = nil
 local diedConnections: { [number]: RBXScriptConnection } = {}
 --- M4-10: which A/B arm this run is on. nil before a run has started.
 local arm: AbTest.Arm? = nil
@@ -78,6 +91,12 @@ local function watchDeath(player: Player)
 		if humanoid == nil or not humanoid:IsA("Humanoid") then
 			return
 		end
+
+		-- The health pool, which Roblox otherwise leaves at its default 100.
+		-- Raising MaxHealth alone would leave the player spawning on a partly
+		-- empty bar, since Health does not follow it.
+		humanoid.MaxHealth = CombatConfig.PLAYER_MAX_HEALTH
+		humanoid.Health = humanoid.MaxHealth
 		local existing = diedConnections[player.UserId]
 		if existing then
 			existing:Disconnect()
@@ -113,6 +132,7 @@ function RunLifecycleService.start(seed: number)
 		schedule[zone] = config.padOpensAt
 	end
 	sincePush = 0
+	sinceComplete = 0
 
 	LootService.populate(seed)
 
@@ -142,6 +162,46 @@ end
 
 function RunLifecycleService.getState(): Run.RunState?
 	return state
+end
+
+--- How a fresh run gets started. Bootstrap owns the wiring because a restart
+--- has to clear entities and reset the wave scheduler too.
+function RunLifecycleService.setRestarter(fn: (seed: number?) -> ())
+	restarter = fn
+end
+
+--- A player asking to drop back in once the run is over.
+---
+--- Server-authoritative like everything else the client asks for: the rule
+--- lives in `Run.canRedeploy`, and a client asking mid-run or twice in a frame
+--- is refused. Returns `(false, reason)` rather than throwing, per CLAUDE.md.
+function RunLifecycleService.requestRedeploy(player: Player): (boolean, string?)
+	local current = state
+	if current == nil then
+		return false, "no_run"
+	end
+	if restarter == nil then
+		return false, "no_restarter"
+	end
+	-- Only players who were in the run may restart it. Not a security boundary
+	-- so much as a correctness one: a spectator who joined after the end has no
+	-- standing to wipe everyone else's summary off the screen.
+	if current.players[player.UserId] == nil then
+		return false, "not_in_run"
+	end
+
+	local ok, reason = Run.canRedeploy(current, sinceComplete, REDEPLOY_DEBOUNCE)
+	if not ok then
+		return false, reason
+	end
+
+	TelemetryService.emit("run.redeploy", {
+		afterSeconds = current.elapsedSeconds,
+		endReason = current.endReason,
+	}, player.UserId)
+
+	;(restarter :: any)(nil)
+	return true
 end
 
 --- M4-10: nil before any run has started. Arm A (control) is FSM-only --
@@ -247,6 +307,10 @@ function RunLifecycleService.step(tick: number, dt: number)
 
 	LootService.setTick(tick)
 
+	if current.complete then
+		sinceComplete += dt
+	end
+
 	-- Reconcile the roster rather than relying on PlayerAdded having fired
 	-- after the run existed. At boot the server starts the run before the
 	-- local player has joined, and a PlayerAdded that lands while `state` is
@@ -324,12 +388,27 @@ function RunLifecycleService.step(tick: number, dt: number)
 				startingHeadcount = current.startingHeadcount,
 				complete = current.complete,
 				zone = zone,
+				-- Whether the redeploy control should be offered. Decided here
+				-- rather than by the client re-deriving it from `complete`: the
+				-- debounce lives on the server, and a button that appears a
+				-- moment before the server will honour it reads as broken.
+				canRedeploy = (Run.canRedeploy(current, sinceComplete, REDEPLOY_DEBOUNCE)),
+				endReason = current.endReason,
 			})
 		end
 	end
 end
 
 function RunLifecycleService.init()
+	Remotes.event("RedeployRequest").OnServerEvent:Connect(function(player: Player)
+		-- The return value is deliberately dropped. A refusal needs no reply:
+		-- the client only offers the button when the last RunState said it was
+		-- allowed, so any refusal is either a race with that 1 Hz push or a
+		-- client that should not have asked. Either way the next push carries
+		-- the truth a beat later.
+		RunLifecycleService.requestRedeploy(player)
+	end)
+
 	Players.PlayerAdded:Connect(function(player)
 		watchDeath(player)
 		local current = state

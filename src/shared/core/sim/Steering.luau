@@ -138,12 +138,55 @@ end
 --- Yaw an entity should face while moving with `velocity`. Returns
 --- `currentYaw` when nearly stationary, so a stopped entity keeps facing where
 --- it was rather than snapping to zero.
-function Steering.facingYaw(velocity: Types.Vec3, currentYaw: number): number
+---
+--- `minMagnitude` guards against a hypersensitive direction: the raw EPSILON
+--- floor only rejects a *numerically* degenerate vector, but a 0.3-stud offset
+--- is numerically fine and directionally violent — sub-stud movement by the
+--- target swings its angle through tens of degrees per tick. Callers facing a
+--- nearby target pass a real standoff distance here instead.
+function Steering.facingYaw(velocity: Types.Vec3, currentYaw: number, minMagnitude: number?): number
 	local flat = flatten(velocity)
-    if Types.magnitude(flat) < EPSILON then
+	local floor = math.max(minMagnitude or 0, EPSILON)
+	if Types.magnitude(flat) < floor then
 		return currentYaw
 	end
 	return math.atan2(flat.x, flat.z)
+end
+
+--- Shortest signed angular difference from `from` to `to`, in (-pi, pi].
+--- Turning 350 degrees left is really 10 degrees right, and an entity that does
+--- not know that spins the long way round every time it crosses the seam.
+function Steering.angleDelta(from: number, to: number): number
+	local delta = (to - from) % (math.pi * 2)
+	if delta > math.pi then
+		delta -= math.pi * 2
+	end
+	return delta
+end
+
+--- Rotate `currentYaw` toward `desiredYaw`, capped at `maxTurnRate` rad/s.
+---
+--- Without this, yaw is assigned straight from `atan2` and an entity can
+--- reverse its facing completely between two ticks. Nothing in the world turns
+--- instantly, and at 20 Hz an instant reversal reads as a violent spin rather
+--- than as a turn. The cap is what makes a crowded melee legible.
+function Steering.slewYaw(currentYaw: number, desiredYaw: number, maxTurnRate: number, dt: number): number
+	if currentYaw ~= currentYaw or desiredYaw ~= desiredYaw then
+		return currentYaw
+	end
+	if dt <= 0 or dt ~= dt or dt == math.huge then
+		return currentYaw
+	end
+	if maxTurnRate <= 0 or maxTurnRate ~= maxTurnRate then
+		return currentYaw
+	end
+
+	local delta = Steering.angleDelta(currentYaw, desiredYaw)
+	local maxStep = maxTurnRate * dt
+	if math.abs(delta) <= maxStep then
+		return desiredYaw
+	end
+	return currentYaw + (if delta > 0 then maxStep else -maxStep)
 end
 
 return Steering

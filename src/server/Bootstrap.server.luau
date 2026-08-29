@@ -8,9 +8,15 @@
 	catch up asynchronously.
 
 	Phase order inside the tick is the other half of the contract:
-	simulate -> record history -> resolve combat -> guard movement -> replicate.
-	Combat must resolve against history recorded this tick, and replication must
-	see the results of combat, or a kill takes an extra tick to appear.
+	spawn waves -> simulate -> record history -> resolve combat -> resolve
+	enemy strikes -> settle repairs -> guard movement -> advance the run ->
+	replicate. Repairs settle after enemy strikes so a hit landing this tick
+	interrupts a channel before that channel can complete on the same tick. Waves come
+	first so an entity spawned this tick is stepped and recorded into history on
+	the same tick. Combat must resolve against history recorded this tick, and
+	enemy strikes after it so an entity killed this tick cannot swing back from
+	beyond the grave. Replication must see the results of both, or a kill takes
+	an extra tick to appear.
 ]]
 
 local Players = game:GetService("Players")
@@ -19,6 +25,7 @@ local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 local Branding = require(Shared.config.Branding)
 local Rooms = require(Shared.config.Rooms)
 local Types = require(Shared.core.Types)
+local Run = require(Shared.core.sim.Run)
 local Remotes = require(Shared.net.Remotes)
 local Wire = require(Shared.net.Wire)
 
@@ -30,8 +37,12 @@ local RunLifecycleService = require("./services/RunLifecycleService")
 local EntityService = require("./services/EntityService")
 local ReplicationService = require("./services/ReplicationService")
 local CombatService = require("./services/CombatService")
+local EnemyCombatService = require("./services/EnemyCombatService")
+local MeleeService = require("./services/MeleeService")
+local RepairService = require("./services/RepairService")
 local MovementGuardService = require("./services/MovementGuardService")
 local DirectorService = require("./services/DirectorService")
+local WaveService = require("./services/WaveService")
 local QueueService = require("./services/QueueService")
 local EconomyService = require("./services/EconomyService")
 local MarketService = require("./services/MarketService")
@@ -62,6 +73,93 @@ local function playerTargets(): { EntityService.Target }
 	return out
 end
 
+--- Start a fresh run in place, without restarting the server.
+---
+--- Shared by the `runRestart` diagnostic and by the player-facing redeploy
+--- remote, so the thing a player triggers is the thing that gets smoke-tested
+--- rather than a parallel implementation that drifts from it.
+---
+--- Order matters: entities die before the run is rebuilt, or the first tick of
+--- the new run inherits a swarm spawned against the old one's budget and the
+--- difficulty curve starts halfway up.
+local function restartRun(seed: number?): number
+	WaveService.reset()
+	for _, view in EntityService.views() do
+		EntityService.remove(view.id)
+	end
+	EnemyCombatService.reset()
+
+	-- A dead player has to be back on their feet before `start`, because
+	-- `Run.new` takes the roster as active and a corpse cannot extract.
+	local respawned = 0
+	for _, player in Players:GetPlayers() do
+		local character = player.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		if humanoid == nil or humanoid.Health <= 0 then
+			player:LoadCharacter()
+			respawned += 1
+		else
+			humanoid.Health = humanoid.MaxHealth
+		end
+	end
+
+	-- `start` calls LootService.populate, which clears the ground *and* every
+	-- carry, so a restart cannot bank loot picked up in the previous run.
+	RepairService.resetAll()
+	RunLifecycleService.start(seed or Rooms.defaultSeed)
+
+	-- Carry is now empty but the HUD's weight bar still shows the old number:
+	-- CarryUpdate only fires on pickup and drop, and neither happened. Push it
+	-- explicitly, which also restores WalkSpeed for anyone who was crawling
+	-- under a full load when the run ended.
+	for _, player in Players:GetPlayers() do
+		LootService.refresh(player)
+	end
+
+	return respawned
+end
+
+--- Ring `count` entities of `kind` around the player, grounded.
+---
+--- Shared by the `spawnAt` diagnostic and the `sweepProbe`, so the probe
+--- exercises the same placement the smoke test does rather than a second
+--- implementation that can drift from it.
+local function spawnRing(kind: string?, count: number?, distance: number?): any
+	local player = Players:GetPlayers()[1]
+	local character = player and player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if root == nil or not root:IsA("BasePart") then
+		return { error = "no character" }
+	end
+	local enemyKind = kind or "Hauler"
+	local config = (require(Shared.config.Enemies) :: any)[enemyKind]
+	if config == nil then
+		return { error = `unknown kind {enemyKind}` }
+	end
+
+	-- Face the direction the character is facing, so a single entity lands in
+	-- front rather than at an arbitrary compass point behind the camera.
+	local forward = root.CFrame.LookVector
+	local n = count or 1
+	local radius = distance or 22
+	local tick = TickService.getTick()
+	local ids: { number } = {}
+	local placed: { string } = {}
+	for i = 1, n do
+		local angle = if n == 1 then 0 else ((i - 1) / n) * math.pi * 2
+		local direction = CFrame.fromAxisAngle(Vector3.yAxis, angle) * forward
+		local at = root.Position + Vector3.new(direction.X, 0, direction.Z).Unit * radius
+		-- Centre the hitbox a radius above the floor, or the sphere sinks
+		-- into it and shots at the lower half stop on the ground.
+		local entity = EntityService.spawn(enemyKind :: any, {
+			x = at.X, y = root.Position.Y - 3 + config.hitboxRadius, z = at.Z,
+		}, tick)
+		table.insert(ids, entity.id)
+		table.insert(placed, string.format("id=%d at (%.1f, %.1f, %.1f)", entity.id, entity.pos.x, entity.pos.y, entity.pos.z))
+	end
+	return { kind = enemyKind, ids = ids, placed = placed, count = EntityService.count() }
+end
+
 local function main()
 	Remotes.init()
 
@@ -77,12 +175,22 @@ local function main()
 	ReplicationService.init()
 	CombatService.init()
 	MovementGuardService.init()
+	MeleeService.init()
+	RepairService.init()
 	LootService.init()
 	RunLifecycleService.init()
 
 	-- Loot asks the run whether a player may still carry, so a dead or
 	-- extracted player cannot keep looting.
 	LootService.setCarryPredicate(RunLifecycleService.isActive)
+
+	-- How the run restarts itself when a player redeploys. Injected rather than
+	-- reached for, so RunLifecycleService does not have to know about waves,
+	-- entities, or enemy cooldowns to own the *rule* about when a restart is
+	-- allowed.
+	RunLifecycleService.setRestarter(function(seed: number?)
+		restartRun(seed)
+	end)
 
 	-- OVERSEER (M4): the FSM baseline runs regardless of backend
 	-- availability, per this file's own boot-order contract above.
@@ -100,14 +208,63 @@ local function main()
 		local weight = LootService.carriedWeight(player.UserId)
 		local Loot = require(Shared.core.sim.Loot)
 		local Economy = require(Shared.config.Economy)
-		return LootService.BASE_WALK_SPEED * Loot.speedMultiplier(weight, Economy.weight.tiers :: any)
+		local Movement = require(Shared.config.Movement)
+		local speed = LootService.BASE_WALK_SPEED * Loot.speedMultiplier(weight, Economy.weight.tiers :: any)
+		-- A sprinting player legitimately exceeds walk speed, and a guard that
+		-- does not know about it kicks them for it -- exactly the shape of the
+		-- jump bug, where the budget was a walk speed and gravity was not.
+		if MovementGuardService.isSprinting(player) then
+			speed *= Movement.SPRINT_MULTIPLIER
+		end
+		return speed
 	end)
 
 	EntityService.setTargetProvider(playerTargets)
 
+	-- M2-8's adapter half. The budget planner has existed since M2 but nothing
+	-- called it, so a real session contained no enemies at all.
+	WaveService.setRunProvider(function(): WaveService.RunView
+		local run = RunLifecycleService.getState()
+		if run == nil then
+			return { active = false, elapsedSeconds = 0, headcount = 0, seed = 0 }
+		end
+		return {
+			active = not run.complete and Run.activeCount(run) > 0,
+			elapsedSeconds = run.elapsedSeconds,
+			-- Live count, not startingHeadcount: budget should fall as a squad
+			-- dies or extracts, or the last player alive inherits pressure
+			-- scaled for a full team.
+			headcount = Run.activeCount(run),
+			seed = run.seed,
+		}
+	end)
+	-- Closes the loop the other way: the director's pressure input has been a
+	-- hardcoded 0 since M4 because nothing tracked spent budget.
+	DirectorService.setBudgetSpentProvider(WaveService.aliveValue)
+
+	-- A player who already died or extracted is out of the run and must stop
+	-- being a valid target, or corpses and extracted players keep soaking hits.
+	-- Same predicate LootService uses, for the same reason.
+	EnemyCombatService.setStrikePredicate(RunLifecycleService.isActive)
+
+	-- Same predicate again: a dead or extracted player must not keep swinging
+	-- any more than they keep looting or soaking hits.
+	MeleeService.setActionPredicate(RunLifecycleService.isActive)
+	RepairService.setActionPredicate(RunLifecycleService.isActive)
+
+	-- Before `sim`, so an entity spawned this tick is stepped and recorded into
+	-- the rewind history on the same tick it appears. After replication it
+	-- would exist for a tick without being in any snapshot.
+	TickService.addPhase("waves", WaveService.step)
 	TickService.addPhase("sim", EntityService.step)
 	TickService.addPhase("history", EntityService.recordHistory)
 	TickService.addPhase("combat", CombatService.step)
+	-- After `combat`, so an entity killed by a player this tick does not also
+	-- get to land a strike from beyond the grave.
+	TickService.addPhase("enemyCombat", EnemyCombatService.step)
+	-- After `enemyCombat`: a strike landing this tick must interrupt a repair
+	-- before that repair can complete on the same tick.
+	TickService.addPhase("repair", RepairService.step)
 	TickService.addPhase("movement", MovementGuardService.step)
 	-- After combat and movement: extraction and death must see this tick's
 	-- outcomes, or a player killed on the tick they reach a pad extracts anyway.
@@ -184,9 +341,9 @@ local function main()
 			local e = EntityService.get(view.id)
 			if e then
 				table.insert(rows, string.format(
-					"id=%d kind=%s state=%s hp=%.0f/%.0f pos=(%.1f,%.1f,%.1f) vel=(%.2f,%.2f,%.2f)",
+					"id=%d kind=%s state=%s hp=%.0f/%.0f pos=(%.1f,%.1f,%.1f) vel=(%.2f,%.2f,%.2f) yaw=%.4f",
 					e.id, e.kind, e.state, e.hp, e.maxHp,
-					e.pos.x, e.pos.y, e.pos.z, e.vel.x, e.vel.y, e.vel.z
+					e.pos.x, e.pos.y, e.pos.z, e.vel.x, e.vel.y, e.vel.z, e.yaw
 				))
 			end
 		end
@@ -706,6 +863,48 @@ local function main()
 		))
 		return rows
 	end)
+	-- Start the run over without restarting the server.
+	--
+	-- A run ends the moment the last active player dies, and in a solo Studio
+	-- session that is one death: `endReason="squadResolved"`, `active=0`, the
+	-- wave scheduler correctly reports `run_inactive` forever, and the HUD keeps
+	-- showing `LOST` after the character respawns -- which also hides the
+	-- crosshair. All of that is right for an extraction shooter and useless for
+	-- playtesting, where the loop under test is the thirty seconds after
+	-- contact and it costs a server restart to see it twice.
+	--
+	-- This is the cheap fix, not the honest one. The honest one is a lobby and
+	-- a redeploy, which is a real feature with a real UI; see docs/13 §3.
+	Diagnostics.register("runRestart", function(seed: number?)
+		local respawned = restartRun(seed)
+		return {
+			seed = seed or Rooms.defaultSeed,
+			respawned = respawned,
+			entitiesRemaining = EntityService.count(),
+			run = RunLifecycleService.describe(),
+			waves = WaveService.describe(),
+		}
+	end)
+
+	-- Same path a player's REDEPLOY button takes, driven without a click, so a
+	-- smoke test can prove the server half works when the UI half is untestable
+	-- from here.
+	Diagnostics.register("redeployProbe", function()
+		local player = Players:GetPlayers()[1]
+		if player == nil then
+			return { error = "no player connected" }
+		end
+		local before = RunLifecycleService.describe()
+		local ok, reason = RunLifecycleService.requestRedeploy(player)
+		task.wait(0.3)
+		return {
+			runWasComplete = before.complete,
+			granted = ok,
+			refusedBecause = reason,
+			runAfter = RunLifecycleService.describe(),
+		}
+	end)
+
 	Diagnostics.register("clearLevel", function()
 		LevelService.clear()
 		return "level cleared, scaffolding restored"
@@ -901,7 +1100,366 @@ local function main()
 		return rows
 	end)
 
+	Diagnostics.register("waveInfo", WaveService.describe)
+	Diagnostics.register("enemyCombatMetrics", EnemyCombatService.getMetrics)
+	Diagnostics.register("meleeMetrics", MeleeService.getMetrics)
+	Diagnostics.register("repairMetrics", RepairService.getMetrics)
+
+	-- Enemy damage acceptance: stand a player in a swarm and report what
+	-- actually lands. Reads HP directly rather than trusting the metrics
+	-- counter, so "damage was dealt" and "the player's health moved" are
+	-- checked independently -- the whole gap this closes was a counter that
+	-- would have read zero while everything else looked correct.
+	Diagnostics.register("enemyDamageProbe", function(kind: string?, count: number?, seconds: number?)
+		local player = Players:GetPlayers()[1]
+		local character = player and player.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+		if humanoid == nil or rootPart == nil or not rootPart:IsA("BasePart") then
+			return { error = "no character" }
+		end
+
+		local enemyKind = kind or "Skitter"
+		local config = (require(Shared.config.Enemies) :: any)[enemyKind]
+		if config == nil then
+			return { error = `unknown kind {enemyKind}` }
+		end
+
+		EnemyCombatService.reset()
+		humanoid.Health = humanoid.MaxHealth
+		local startHp = humanoid.Health
+		local startMetrics = EnemyCombatService.getMetrics()
+
+		-- Spawn a ring just inside attack range so contact is immediate and
+		-- the measurement is of damage, not of pathing.
+		local origin = rootPart.Position
+		local spawned: { number } = {}
+		local n = count or 3
+		local tick = TickService.getTick()
+		for i = 1, n do
+			local angle = (i / n) * math.pi * 2
+			local radius = math.max(2, config.atkRange - 1)
+			local entity = EntityService.spawn(enemyKind :: any, {
+				x = origin.X + math.cos(angle) * radius,
+				y = origin.Y,
+				z = origin.Z + math.sin(angle) * radius,
+			}, tick)
+			table.insert(spawned, entity.id)
+		end
+
+		local rows: { string } = {}
+		local duration = seconds or 5
+		local elapsed = 0
+		local lowestHp = startHp
+		while elapsed < duration do
+			task.wait(0.5)
+			elapsed += 0.5
+			local m = EnemyCombatService.getMetrics()
+			lowestHp = math.min(lowestHp, humanoid.Health)
+			table.insert(rows, string.format(
+				"t=%4.1fs  hp=%6.1f  strikes=%3d  dealt=%6.1f  cooldowns=%d",
+				elapsed, humanoid.Health, m.strikes, m.damageDealt, m.pendingCooldowns
+			))
+			if humanoid.Health <= 0 then
+				break
+			end
+		end
+
+		for _, id in spawned do
+			EntityService.remove(id)
+		end
+		local finalMetrics = EnemyCombatService.getMetrics()
+		humanoid.Health = humanoid.MaxHealth
+
+		return {
+			kind = enemyKind,
+			spawned = n,
+			expectedDamagePerHit = config.dmg,
+			expectedCooldown = config.atkCooldown,
+			hpBefore = startHp,
+			lowestHp = lowestHp,
+			-- Health observed on the Humanoid, against damage the resolver
+			-- believes it dealt. These disagree by design: Roblox's default
+			-- health regeneration ticks 1%/s of MaxHealth between strikes, so
+			-- damageDealt legitimately exceeds the HP drop over any window
+			-- longer than a second. Reporting both is what makes that visible
+			-- rather than looking like an accounting bug.
+			hpDropObserved = startHp - lowestHp,
+			damageResolverDealt = finalMetrics.damageDealt,
+			healthActuallyMoved = lowestHp < startHp,
+			metrics = finalMetrics,
+			timeline = rows,
+		}
+	end)
+
+	-- Waves are on a 12s interval and the first is held 20s, so watching one
+	-- arrive means sitting through a real minute per sample. This drives the
+	-- live service through several intervals at once and reports what each
+	-- decision was -- including the refusals, which is what distinguishes
+	-- "withheld deliberately" from "silently broken".
+	Diagnostics.register("waveProbe", function(seconds: number?, step: number?)
+		local total = seconds or 90
+		local chunk = step or 1
+		local rows: { string } = {}
+		local before = WaveService.describe()
+		table.insert(rows, string.format(
+			"start: alive=%d aliveValue=%.0f zone=%s",
+			before.aliveCount, before.aliveValue, tostring(before.lastZone)
+		))
+
+		local elapsed = 0
+		local lastWaves = before.waves
+		while elapsed < total do
+			-- Step the scheduler directly with a synthetic dt. The tick phase
+			-- advances by real dt, and 90 real seconds is not a smoke test.
+			WaveService.step(TickService.getTick(), chunk)
+			elapsed += chunk
+			local now = WaveService.describe()
+			if now.waves > lastWaves then
+				table.insert(rows, string.format(
+					"t=%3ds  WAVE  target=%.0f aliveValue=%.0f -> alive=%d  zone=%s",
+					elapsed, now.targetBudget, now.aliveValue, now.aliveCount, tostring(now.lastZone)
+				))
+				lastWaves = now.waves
+			end
+			task.wait()
+		end
+
+		local after = WaveService.describe()
+		table.insert(rows, string.format(
+			"end: waves=%d spawned=%d reclaimers=%d alive=%d/%d lastReason=%s",
+			after.waves, after.spawned, after.reclaimersSummoned,
+			after.aliveCount, after.maxAlive, tostring(after.lastReason)
+		))
+		return { rows = rows, info = after, census = after.census }
+	end)
+
+	Diagnostics.register("waveReset", function()
+		WaveService.reset()
+		for _, view in EntityService.views() do
+			EntityService.remove(view.id)
+		end
+		return WaveService.describe()
+	end)
+
+	-- Line-of-sight acceptance. Must be a registered handler rather than a
+	-- command-bar script: `require`-ing EntityService from the bar returns a
+	-- fresh idle copy whose entities no tick phase ever steps, so they sit in
+	-- `spawn` forever and never attack -- which reads exactly like a working
+	-- line-of-sight check and is not one.
+	Diagnostics.register("losProbe", function(kind: string?, seconds: number?)
+		local player = Players:GetPlayers()[1]
+		local character = player and player.Character
+		local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		if rootPart == nil or humanoid == nil or not rootPart:IsA("BasePart") then
+			return { error = "no character" }
+		end
+		local enemyKind = kind or "Sentry"
+		local duration = seconds or 5
+
+		local level = Workspace:FindFirstChild("Level")
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Whitelist
+		params.FilterDescendantsInstances = if level then { level } else {}
+		local origin = rootPart.Position + Vector3.new(0, 2, 0)
+
+		--- Anchor the player for the duration. Without it the character drifts,
+		--- the distance being reported is not the distance damage was resolved
+		--- at, and a mobile enemy walks out from behind the wall the test is
+		--- supposed to be about.
+		local function measure(at: Vector3, label: string)
+			humanoid.Health = humanoid.MaxHealth
+			local wasAnchored = rootPart.Anchored
+			rootPart.Anchored = true
+
+			local before = EnemyCombatService.getMetrics()
+			local entity = EntityService.spawn(
+				enemyKind :: any,
+				{ x = at.X, y = rootPart.Position.Y, z = at.Z },
+				TickService.getTick()
+			)
+
+			-- Sample whether sight is genuinely obstructed rather than trusting
+			-- the placement: "0 strikes" only proves the line-of-sight check if
+			-- the line was actually blocked the whole time.
+			local blockedSamples, samples = 0, 0
+			local deadline = os.clock() + duration
+			while os.clock() < deadline do
+				local live = EntityService.get(entity.id)
+				if live ~= nil then
+					local from = Vector3.new(live.pos.x, live.pos.y, live.pos.z)
+					if Workspace:Raycast(from, rootPart.Position - from, params) ~= nil then
+						blockedSamples += 1
+					end
+					samples += 1
+				end
+				task.wait(0.1)
+			end
+
+			local after = EnemyCombatService.getMetrics()
+			local live = EntityService.get(entity.id)
+			local endDistance = if live ~= nil
+				then (Vector3.new(live.pos.x, live.pos.y, live.pos.z) - rootPart.Position).Magnitude
+				else -1
+			EntityService.remove(entity.id)
+			rootPart.Anchored = wasAnchored
+
+			local strikes = after.strikes - before.strikes
+			local damage = after.damageDealt - before.damageDealt
+			return string.format(
+				"%-16s endDist=%5.1f state=%-6s blocked=%3d%% strikes=%2d damage=%6.1f perHit=%s",
+				label, endDistance, live and live.state or "gone",
+				math.floor(100 * blockedSamples / math.max(samples, 1)),
+				strikes, damage,
+				if strikes > 0 then string.format("%.2f", damage / strikes) else "n/a"
+			)
+		end
+
+		local rows: { string } = {}
+
+		-- Eight directions, not four: from an open floor tile the axis-aligned
+		-- rays often all miss, and "no wall within range" is a skipped test
+		-- dressed up as a result.
+		local DIRECTIONS = {}
+		for i = 0, 7 do
+			local a = (i / 8) * math.pi * 2
+			table.insert(DIRECTIONS, Vector3.new(math.cos(a), 0, math.sin(a)))
+		end
+
+		-- Blocked: just past the first wall found within attack range.
+		local blocked: Vector3? = nil
+		for _, d in DIRECTIONS do
+			local r = Workspace:Raycast(origin, d * 60, params)
+			if r ~= nil and r.Distance > 6 and r.Distance < 40 then
+				blocked = r.Position + d * 5
+				break
+			end
+		end
+		rows[#rows + 1] = if blocked ~= nil
+			then measure(blocked, "behind a wall")
+			else "behind a wall    -- no wall within range from here"
+
+		-- Clear: a direction with nothing in the way.
+		local clear: Vector3? = nil
+		for _, d in DIRECTIONS do
+			if Workspace:Raycast(origin, d * 26, params) == nil then
+				clear = rootPart.Position + d * 24
+				break
+			end
+		end
+		rows[#rows + 1] = if clear ~= nil
+			then measure(clear, "clear sightline")
+			else "clear sightline  -- no clear 26-stud line from here"
+
+		humanoid.Health = humanoid.MaxHealth
+		return rows
+	end)
+
+	-- Reload acceptance: empty a magazine, reload it, and confirm firing is
+	-- refused for the whole window and permitted after. Registered here rather
+	-- than driven from the command bar, which gets a fresh idle CombatService.
+	Diagnostics.register("reloadProbe", function(weaponId: string?)
+		local player = Players:GetPlayers()[1]
+		if player == nil then
+			return { error = "no player connected" }
+		end
+		local id = weaponId or "Sidearm"
+		local weapon = (require(Shared.config.Weapons) :: any)[id]
+		if weapon == nil or weapon.magazine == nil then
+			return { error = `{id} has no magazine` }
+		end
+
+		local rows: { string } = {}
+		local function fireOnce(): string
+			local before = CombatService.getMetrics()
+			CombatService.submit(player, {
+				seq = 0,
+				clientTime = TickService.now(),
+				origin = Vector3.new(0, 5, 0),
+				direction = Vector3.new(0, 0, 1),
+				weaponId = id,
+			})
+			task.wait(0.12)
+			local after = CombatService.getMetrics()
+			if after.rejectedReloading > before.rejectedReloading then
+				return "rejected:reloading"
+			elseif after.rejectedAmmo > before.rejectedAmmo then
+				return "rejected:ammo"
+			elseif after.rejectedRate > before.rejectedRate then
+				return "rejected:rate"
+			end
+			return "accepted"
+		end
+
+		CombatService.reload(player, id)
+		task.wait(0.15)
+
+		-- Drain the magazine. Rate limiting means this needs spacing.
+		local interval = 1 / (weapon.rps or 4) + 0.03
+		for _ = 1, weapon.magazine do
+			CombatService.submit(player, {
+				seq = 0,
+				clientTime = TickService.now(),
+				origin = Vector3.new(0, 5, 0),
+				direction = Vector3.new(0, 0, 1),
+				weaponId = id,
+			})
+			task.wait(interval)
+		end
+		rows[#rows + 1] = `after draining {weapon.magazine} rounds, firing -> {fireOnce()}`
+
+		local started, reason = CombatService.requestReload(player, id)
+		rows[#rows + 1] = `requestReload -> {tostring(started)} {tostring(reason)}`
+
+		-- Mid-reload: must be refused.
+		task.wait(weapon.reloadSeconds * 0.4)
+		rows[#rows + 1] = `firing mid-reload ({string.format("%.1f", weapon.reloadSeconds * 0.4)}s in) -> {fireOnce()}`
+
+		-- A second request while one is in flight must not restart the timer.
+		local again, againReason = CombatService.requestReload(player, id)
+		rows[#rows + 1] = `requestReload again mid-reload -> {tostring(again)} {tostring(againReason)}`
+
+		-- Wait out the remainder.
+		task.wait(weapon.reloadSeconds)
+		rows[#rows + 1] = `firing after the reload window -> {fireOnce()}`
+
+		-- Reloading a full magazine is a no-op, not a lockout.
+		CombatService.reload(player, id)
+		task.wait(0.1)
+		local fullOk, fullReason = CombatService.requestReload(player, id)
+		rows[#rows + 1] = `requestReload on a full magazine -> {tostring(fullOk)} {tostring(fullReason)}`
+
+		return { weapon = id, reloadSeconds = weapon.reloadSeconds, steps = rows, metrics = CombatService.getMetrics() }
+	end)
+
+	-- Melee acceptance without a keypress: spawn a ring inside the arc, swing,
+	-- and report what the sweep actually connected with.
+	Diagnostics.register("sweepProbe", function(kind: string?, count: number?)
+		local player = Players:GetPlayers()[1]
+		if player == nil then
+			return { error = "no player connected" }
+		end
+		MeleeService.reset()
+		local spawned = spawnRing(kind or "Skitter", count or 5, 7)
+		task.wait(0.6)
+		local first = { MeleeService.swing(player) }
+		local afterFirst = MeleeService.getMetrics()
+		-- Immediately again: must be refused by the cooldown.
+		local second = { MeleeService.swing(player) }
+		return {
+			spawned = spawned,
+			firstSwing = { ok = first[1], reason = first[2] },
+			secondSwingImmediately = { ok = second[1], reason = second[2] },
+			targetsHit = afterFirst.hits,
+			kills = afterFirst.kills,
+			damage = afterFirst.damageDealt,
+			metrics = MeleeService.getMetrics(),
+		}
+	 end)
+
 	Diagnostics.register("movementMetrics", MovementGuardService.getMetrics)
+	Diagnostics.register("movementViolations", MovementGuardService.getViolations)
 	Diagnostics.register("bandwidth", ReplicationService.sampleBandwidth)
 	Diagnostics.register("bench", TickBench.run)
 	Diagnostics.register("benchSweep", TickBench.sweep)
@@ -920,9 +1478,19 @@ local function main()
 		return EntityService.count()
 	end)
 
+	-- `spawn` above rings the *world origin*, which quietly invalidates any
+	-- positional test run from anywhere else: the entities land outside the
+	-- player's interest radius, never replicate, and the result reads as a
+	-- rendering or targeting failure. This rings the player instead, grounded
+	-- the same way WaveService grounds a real spawn point.
+	Diagnostics.register("spawnAt", spawnRing)
+
 	TickService.start()
 
-	print(`[{Branding.gameName}] server up — tick {1 / 20}s, phases: sim/history/combat/movement/run/replication`)
+	print(
+		`[{Branding.gameName}] server up — tick {1 / 20}s, `
+			.. `phases: waves/sim/history/combat/enemyCombat/repair/movement/run/replication`
+	)
 	print(
 		`[{Branding.gameName}] level seed {layout.seed} — {#layout.modules} modules `
 			.. `({layout.spineCount} spine + {layout.branchCount} branches), {layout.totalArea} studs^2`

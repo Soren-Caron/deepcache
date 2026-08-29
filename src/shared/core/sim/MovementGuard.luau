@@ -55,6 +55,24 @@ export type Params = {
 	--- without limit until something stops it, so this is deliberately
 	--- generous: falling fast is gravity, not cheating.
 	maxFallSpeed: number,
+	--- Seconds of movement averaged together before speed is judged.
+	---
+	--- **This is what stops the guard measuring the network instead of the
+	--- player.** The server samples a replicated position on its own fixed
+	--- tick, but positions arrive in bursts: several ticks see no change, then
+	--- one absorbs two packets' worth of movement. Divided by that tick's dt
+	--- it reads as a huge speed. Measured in a real session, an honest player
+	--- walking at 16 produced per-tick samples of 24.5, 27.0 and 29.9 studs/s
+	--- against a 21.6 allowance, purely from replication jitter -- roughly one
+	--- false violation a second, against a decay of one a second, so the score
+	--- ratcheted upward until it crossed `correctAt` and yanked the player
+	--- back. That is what a stutter that cancels your movement is.
+	---
+	--- Averaging over a window is immune to burstiness and still catches the
+	--- thing worth catching, because a speed hack sustains by definition. The
+	--- cost is detection latency of about one window, which is nothing next to
+	--- the score threshold it then has to climb.
+	windowSeconds: number,
 	--- How many consecutive ticks a player may rise faster than their own
 	--- ground speed before it stops being a jump. Instantaneous speed cannot
 	--- separate a jump from a slow fly hack -- a hack rising at 40 studs/s is
@@ -72,6 +90,23 @@ export type State = {
 	--- Consecutive ticks spent rising faster than ground movement could
 	--- explain. See `maxRiseTicks`.
 	risingTicks: number,
+	--- Movement accumulated since the last speed judgement. See
+	--- `Params.windowSeconds`.
+	windowTime: number,
+	windowHorizontal: number,
+	windowRise: number,
+	windowFall: number,
+	--- The most permissive allowance seen during the window.
+	---
+	--- Most permissive, not the latest, and that also fixes a second bug: the
+	--- client raises its own WalkSpeed the instant sprint starts and only then
+	--- tells the server, so for one round trip the guard was budgeting a walk
+	--- speed against a sprint. Taking the maximum over the window means a
+	--- sprint that began at any point inside it is budgeted as a sprint.
+	--- Erring permissive is correct here: the cost of a false negative is one
+	--- cheater moving slightly faster, and the cost of a false positive is
+	--- teleporting an honest player backwards.
+	windowAllowance: number,
 }
 
 export type Action = "ok" | "correct" | "kick"
@@ -103,12 +138,24 @@ local DEFAULT_PARAMS: Params = {
 	-- gravity brings it back under. 10 is ~2.5x that -- generous enough that
 	-- no legitimate arc trips it, tight enough that a sustained climb does.
 	maxRiseTicks = 10,
+	-- Long enough to absorb replication bursting, short enough that a real
+	-- speed hack is flagged within a second.
+	windowSeconds = 0.75,
 }
 
 MovementGuard.DEFAULT_PARAMS = DEFAULT_PARAMS
 
 function MovementGuard.new(): State
-	return { score = 0, totalViolations = 0, risingTicks = 0 }
+	return {
+		score = 0,
+		totalViolations = 0,
+		risingTicks = 0,
+		windowTime = 0,
+		windowHorizontal = 0,
+		windowRise = 0,
+		windowFall = 0,
+		windowAllowance = 0,
+	}
 end
 
 --- Decay the score toward zero. Called every tick, including clean ones.
@@ -171,29 +218,50 @@ function MovementGuard.check(
 		local dx = newPos.x - previousPos.x
 		local dy = newPos.y - previousPos.y
 		local dz = newPos.z - previousPos.z
-		local horizontal = math.sqrt(dx * dx + dz * dz)
-		local vertical = math.abs(dy)
 
-		local allowedHorizontal = maxSpeed * params.speedMargin * dt
-		local verticalSpeed = if dy >= 0 then params.maxRiseSpeed else params.maxFallSpeed
-		local allowedVertical = verticalSpeed * params.speedMargin * dt
+		-- Accumulate rather than judge. One tick of a replicated position is a
+		-- statement about when packets arrived, not about how fast the player
+		-- moved; see `Params.windowSeconds`.
+		state.windowTime += dt
+		state.windowHorizontal += math.sqrt(dx * dx + dz * dz)
+		if dy >= 0 then
+			state.windowRise += dy
+		else
+			state.windowFall += -dy
+		end
+		state.windowAllowance = math.max(state.windowAllowance, maxSpeed)
 
-		-- Whichever axis overran by the larger factor sets the severity, so a
-		-- player who is both running and falling is not charged twice for one
-		-- frame of ordinary movement.
-		local horizontalExcess = horizontal / math.max(allowedHorizontal, 1e-6)
-		local verticalExcess = vertical / math.max(allowedVertical, 1e-6)
-		local excess = math.max(horizontalExcess, verticalExcess)
+		if state.windowTime >= params.windowSeconds then
+			local window = state.windowTime
+			local allowedHorizontal = state.windowAllowance * params.speedMargin * window
+			local allowedRise = params.maxRiseSpeed * params.speedMargin * window
+			local allowedFall = params.maxFallSpeed * params.speedMargin * window
 
-		if excess > 1 then
-			-- Weight the violation by how far past the budget it went, so a
-			-- marginal overshoot barely registers and a large one escalates.
-			state.score += math.min(excess, 5)
-			state.totalViolations += 1
-			-- Name the axis that actually overran; "speed" alone sent a real
-			-- investigation looking at horizontal movement that was zero.
-			table.insert(reasons, if verticalExcess > horizontalExcess then "vertical_speed" else "speed")
-			corrected = previousPos
+			-- Whichever axis overran by the larger factor sets the severity, so a
+			-- player who is both running and falling is not charged twice for one
+			-- stretch of ordinary movement.
+			local horizontalExcess = state.windowHorizontal / math.max(allowedHorizontal, 1e-6)
+			local riseExcess = state.windowRise / math.max(allowedRise, 1e-6)
+			local fallExcess = state.windowFall / math.max(allowedFall, 1e-6)
+			local verticalExcess = math.max(riseExcess, fallExcess)
+			local excess = math.max(horizontalExcess, verticalExcess)
+
+			if excess > 1 then
+				-- Weight the violation by how far past the budget it went, so a
+				-- marginal overshoot barely registers and a large one escalates.
+				state.score += math.min(excess, 5)
+				state.totalViolations += 1
+				-- Name the axis that actually overran; "speed" alone sent a real
+				-- investigation looking at horizontal movement that was zero.
+				table.insert(reasons, if verticalExcess > horizontalExcess then "vertical_speed" else "speed")
+				corrected = previousPos
+			end
+
+			state.windowTime = 0
+			state.windowHorizontal = 0
+			state.windowRise = 0
+			state.windowFall = 0
+			state.windowAllowance = 0
 		end
 
 		-- Sustained climb. A per-tick speed check cannot catch a fly hack that
@@ -243,10 +311,24 @@ function MovementGuard.check(
 		end
 	end
 
+	-- **A correction needs evidence *this* evaluation, not just a standing
+	-- score.** Without the `#reasons > 0` term this branch fires on every
+	-- subsequent tick until the score decays back under the threshold -- at one
+	-- point per second from a threshold of five, that is several seconds of the
+	-- player being teleported to their previous position twenty times a second.
+	-- Measured in a live session: 7 violations produced 109 corrections. From
+	-- the player's side that is not a correction, it is being pinned in place,
+	-- and it is exactly the "stutters and cancels the movement I wanted"
+	-- report this came from.
+	--
+	-- The score still does the escalating: it is what decides whether a fresh
+	-- violation is worth acting on, and it keeps climbing toward `kickAt` for
+	-- someone who keeps producing them. It just no longer manufactures evidence
+	-- of its own.
 	local action: Action = "ok"
 	if state.score >= params.kickAt then
 		action = "kick"
-	elseif state.score >= params.correctAt then
+	elseif #reasons > 0 and state.score >= params.correctAt then
 		action = "correct"
 	elseif #reasons > 0 then
 		-- Flagged but under threshold: let it ride. This is the branch that

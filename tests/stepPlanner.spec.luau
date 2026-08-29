@@ -375,3 +375,84 @@ t.describe("StepPlanner.step edge cases", function()
 		expect(#state.legs).toEqual(0)
 	end)
 end)
+
+t.describe("StepPlanner foot reach", function()
+	-- Found in Studio: fast kinds looked like spiders. `TwoBoneIk` correctly
+	-- clamps an out-of-range target and extends the leg toward it, but a foot
+	-- the body has outrun is out of range *every* frame, so the limb is
+	-- permanently straight rather than momentarily reaching.
+	local OFFSETS = {
+		v3(0.6, -0.85, 0.65),
+		v3(-0.6, -0.85, 0.65),
+		v3(0.6, -0.85, -0.65),
+		v3(-0.6, -0.85, -0.65),
+	}
+	local GROUPS = { 1, 2, 2, 1 }
+
+	--- Worst planted-foot distance from where that foot should be standing.
+	--- Planted only: a leg in flight is by definition travelling to its next
+	--- spot, and measuring it would report the stride as over-extension.
+	local function worstPlanted(maxOffset: number?, speed: number, frames: number): number
+		local state = StepPlanner.new(OFFSETS, GROUPS, maxOffset)
+		local pos = v3(0, 0, 0)
+		for _ = 1, frames do
+			pos = v3(pos.x, pos.y, pos.z + speed * 0.05)
+			StepPlanner.step(state, pos, v3(0, 0, speed), 0.05, function(p)
+				return v3(p.x, 0, p.z)
+			end)
+		end
+		local worst = 0
+		for _, leg in state.legs do
+			if leg.stepPhase <= 0 then
+				local dx = leg.current.x - (pos.x + leg.restOffset.x)
+				local dz = leg.current.z - (pos.z + leg.restOffset.z)
+				worst = math.max(worst, math.sqrt(dx * dx + dz * dz))
+			end
+		end
+		return worst
+	end
+
+	t.it("keeps a planted foot inside the leg's reach at sprint speed", function()
+		-- A Skitter at 22 studs/s against about 1.2 studs of horizontal reach.
+		expect(worstPlanted(1.2, 22, 120) <= 1.2 + 1e-6).toBeTruthy()
+	end)
+
+	t.it("over-extends without a reach limit, which is the bug", function()
+		-- Pinned so the fix cannot be silently reverted: 2.20 studs measured,
+		-- against a leg that reaches 1.2.
+		expect(worstPlanted(nil, 22, 120) > 1.2 * 1.5).toBeTruthy()
+	end)
+
+	t.it("leaves slow kinds untouched", function()
+		-- A Hauler at 8 studs/s never outruns its own feet, so the clamp must
+		-- be inert rather than subtly reshaping its gait.
+		expect(worstPlanted(1.2, 8, 120)).approx(worstPlanted(nil, 8, 120), 1e-9)
+	end)
+
+	t.it("treats nil, zero, negative or NaN reach as unlimited", function()
+		for _, bad in { 0, -5, 0 / 0 } do
+			expect(StepPlanner.new(OFFSETS, GROUPS, bad).maxFootOffset).toEqual(math.huge)
+		end
+		expect(StepPlanner.new(OFFSETS, GROUPS).maxFootOffset).toEqual(math.huge)
+	end)
+
+	t.it("still alternates groups with the clamp active", function()
+		-- The clamp moves feet directly, so it could in principle mask the
+		-- starvation bug M7-2 exists to prevent.
+		local state = StepPlanner.new(OFFSETS, GROUPS, 1.2)
+		local pos = v3(0, 0, 0)
+		for _ = 1, 400 do
+			pos = v3(pos.x, pos.y, pos.z + 22 * 0.05)
+			StepPlanner.step(state, pos, v3(0, 0, 22), 0.05, function(p)
+				return v3(p.x, 0, p.z)
+			end)
+			local inFlight = {}
+			for _, leg in state.legs do
+				if leg.stepPhase > 0 then
+					inFlight[leg.group] = true
+				end
+			end
+			expect(not (inFlight[1] and inFlight[2])).toBeTruthy()
+		end
+	end)
+end)

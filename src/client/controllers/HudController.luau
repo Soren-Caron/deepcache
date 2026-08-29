@@ -30,9 +30,11 @@
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 
 local Remotes = require(Shared.net.Remotes)
+local DamageArc = require(Shared.core.look.DamageArc)
 local LookController = require("./LookController")
 local EconomyConfig = require(Shared.config.Economy)
 local ZonesConfig = require(Shared.config.Zones)
@@ -74,6 +76,75 @@ local padLabel: TextLabel
 local statusLabel: TextLabel
 local vitalsLabel: TextLabel
 local commsLabel: TextLabel
+
+local staminaBar: Frame
+local staminaBack: Frame
+local meleeBar: Frame
+local meleeBack: Frame
+local meleeReadiness = 1
+local repairCharges = 0
+local repairProgress = 0
+local repairing = false
+local staminaFraction = 1
+local staminaExhausted = false
+
+local crosshair: Frame
+local hitmarker: Frame
+local hurtVignette: Frame
+
+local redeployButton: TextButton
+local hintLabel: TextLabel
+local summaryPanel: Frame
+local summaryTitle: TextLabel
+local summaryBody: TextLabel
+local bannerLabel: TextLabel
+local bannerUntil = 0
+local BANNER_SECONDS = 4.5
+--- Shorter than a pad announcement: a notice is a reaction to something the
+--- player just did, so it has to clear before their next attempt.
+local NOTICE_SECONDS = 1.6
+
+--- Damage-direction indicators, newest last.
+---
+--- The attacker's *world* position is stored, not a screen angle. A stored
+--- angle would keep pointing at where the shooter was relative to where the
+--- player used to be facing, so turning toward the arrow would swing it
+--- further away -- worse than no arrow at all. Re-deriving the bearing each
+--- frame against the live camera makes the arrow behave like a compass.
+type DamageMark = { fromX: number, fromZ: number, at: number, frame: Frame }
+local damageMarks: { DamageMark } = {}
+local damageLayer: Frame
+
+--- How long an arrow lives, and how close two hits have to be before they
+--- refresh one arrow instead of stacking two.
+local DAMAGE_MARK_SECONDS = 1.6
+local DAMAGE_MERGE_RADIANS = 0.45
+--- Cap on simultaneous arrows. A swarm otherwise rings the player in arrows,
+--- which conveys less than three do.
+local DAMAGE_MARK_LIMIT = 4
+
+--- Mirrored from PredictionController through a hook, not read from it: the
+--- HUD displaying what the prediction layer believes is the whole point, and
+--- two sources for one number is how a HUD ends up confidently lying.
+local currentWeapon = "Sidearm"
+local currentAmmo = 0
+
+local reloadingWeapon: string? = nil
+local reloadEndsAt = 0
+local reloadSeconds = 0
+
+local hitmarkerUntil = 0
+local hurtUntil = 0
+local lastHealth = -1
+--- The controls legend shows for a while after joining and then gets out of
+--- the way. Permanent would be clutter; never would leave weapon switching and
+--- reload undiscoverable, and both decide fights against elites.
+local hintUntil = 0
+local HINT_SECONDS = 45
+
+local HITMARKER_SECONDS = 0.12
+local HURT_FLASH_SECONDS = 0.45
+local HURT_PEAK_TRANSPARENCY = 0.62
 local commsHideAt = 0
 
 local latest = {
@@ -83,6 +154,8 @@ local latest = {
 	status = "active",
 	active = 0,
 	complete = false,
+	canRedeploy = false,
+	endReason = nil :: string?,
 	weight = 0,
 	value = 0,
 	speedMultiplier = 1,
@@ -154,12 +227,19 @@ local function render()
 	clockLabel.TextColor3 = if latest.remaining <= 60 then ALERT else ACCENT
 
 	local tierIndex, tierName = weightTier(latest.weight)
-	weightLabel.Text = string.format(
-		"%3.0f kg   x%.2f   %s",
-		latest.weight,
-		latest.speedMultiplier,
-		tierName
-	)
+	-- Shown as a speed *penalty*, not as the raw multiplier.
+	--
+	-- This line used to read "49 kg   x0.82   committed", and the first thing
+	-- a player asked was what x0.82 meant. docs/01 argues that "47 kg" means
+	-- nothing without "0.82x, committed" -- which is right, and does not go far
+	-- enough, because 0.82x does not stand on its own either. It is only
+	-- legible if you already know there is a multiplier and what it multiplies.
+	-- A percentage needs no reference table and answers the question the number
+	-- exists for: how much is this costing me.
+	local penalty = math.floor((1 - latest.speedMultiplier) * 100 + 0.5)
+	weightLabel.Text = if penalty <= 0
+		then string.format("%3.0f kg   full speed   %s", latest.weight, tierName)
+		else string.format("%3.0f kg   -%d%% speed   %s", latest.weight, penalty, tierName)
 	-- The bar fills toward the last tier's threshold, so "how close am I to
 	-- crawling" is readable without doing arithmetic.
 	local tiers = EconomyConfig.weight.tiers
@@ -194,8 +274,308 @@ local function render()
 	local character = player.Character
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 	local hp = if humanoid then math.max(0, math.floor(humanoid.Health)) else 0
-	vitalsLabel.Text = string.format("HP %3d", hp)
-	vitalsLabel.TextColor3 = if hp <= 25 then ALERT else DIM
+	-- Weapon rides on the vitals line rather than getting its own: switching is
+	-- new (number keys 1-4) and a player who cannot see which weapon is live
+	-- has no way to tell the switch worked.
+	if reloadingWeapon == currentWeapon and reloadSeconds > 0 then
+		local left = math.max(reloadEndsAt - os.clock(), 0)
+		vitalsLabel.Text = string.format("HP %3d   %s RELOADING %.1fs", hp, currentWeapon, left)
+		vitalsLabel.TextColor3 = ACCENT
+	elseif repairing then
+		vitalsLabel.Text = string.format("HP %3d   REPAIRING %.0f%%", hp, repairProgress * 100)
+		vitalsLabel.TextColor3 = GOOD
+	else
+		vitalsLabel.Text = string.format("HP %3d   %s %d   [G]x%d", hp, currentWeapon, currentAmmo, repairCharges)
+		vitalsLabel.TextColor3 = if hp <= 25 then ALERT elseif currentAmmo == 0 then ALERT else DIM
+	end
+
+	local now = os.clock()
+
+	-- Damage taken is detected from Humanoid health rather than a remote: the
+	-- engine already replicates it, and a dedicated packet per hit would be
+	-- bandwidth spent on something the client can see for free. Regeneration
+	-- ticks health *up*, so only a decrease counts.
+	if humanoid ~= nil then
+		local current = humanoid.Health
+		if lastHealth >= 0 and current < lastHealth - 0.01 then
+			hurtUntil = now + HURT_FLASH_SECONDS
+		end
+		lastHealth = current
+	end
+
+	if now < hurtUntil then
+		local t = (hurtUntil - now) / HURT_FLASH_SECONDS
+		hurtVignette.BackgroundTransparency = 1 - HURT_PEAK_TRANSPARENCY * t * t
+	else
+		hurtVignette.BackgroundTransparency = 1
+	end
+
+	if now < hitmarkerUntil then
+		hitmarker.Visible = true
+		-- Contracts as it fades, so rapid hits read as distinct marks rather
+		-- than one continuous smear. Position is set below, from the cursor.
+		local t = (hitmarkerUntil - now) / HITMARKER_SECONDS
+		local size = 16 + 10 * t
+		hitmarker.Size = UDim2.new(0, size, 0, size)
+	else
+		hitmarker.Visible = false
+	end
+
+	-- Damage arrows. Each is one frame rotated about screen centre, so a single
+	-- shape serves every direction.
+	local camera = workspace.CurrentCamera
+	local look = if camera then camera.CFrame.LookVector else Vector3.zAxis
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	local here = if root and root:IsA("BasePart") then root.Position else Vector3.zero
+	for index = #damageMarks, 1, -1 do
+		local mark = damageMarks[index]
+		local opacity = DamageArc.opacity(now - mark.at, DAMAGE_MARK_SECONDS)
+		if opacity <= 0 then
+			mark.frame:Destroy()
+			table.remove(damageMarks, index)
+		else
+			local bearing = DamageArc.bearing(look.X, look.Z, mark.fromX - here.X, mark.fromZ - here.Z)
+			mark.frame.Rotation = math.deg(bearing)
+			for _, child in mark.frame:GetChildren() do
+				if child:IsA("Frame") then
+					child.BackgroundTransparency = 1 - opacity
+				end
+			end
+		end
+	end
+
+	-- The crosshair dims while dead or extracted: nothing to aim at, and a
+	-- live-looking reticle over a corpse is a small lie.
+	crosshair.Visible = not latest.complete and latest.status ~= "dead"
+
+	bannerLabel.Visible = now < bannerUntil
+	-- The summary rides with the redeploy control: both belong to the moment the
+	-- run resolves, and showing one without the other reads as half a screen.
+	summaryPanel.Visible = latest.canRedeploy == true
+
+	-- Redeploy. Offered only when the server says so, so the button cannot
+	-- appear a moment before the server would honour it.
+	redeployButton.Visible = latest.canRedeploy == true
+	if redeployButton.Visible then
+		-- The summary card owns the payout number now. This line used to repeat
+		-- it from `latest.value`, which is *carried* value -- already banked and
+		-- zeroed by the time the run resolves, so the screen read "+542 credits
+		-- banked" and "EXTRACTED +0 credits" at the same time. Two sources for
+		-- one number, exactly as this file's header warns.
+		statusLabel.Text = ""
+	end
+
+	-- Contextual hints. The systems that decide fights are the two nobody is
+	-- told about: an elite beats a Sidearm one-on-one by design, and the answer
+	-- is a different weapon or a full magazine.
+	local hint = ""
+	if reloadingWeapon == nil and currentAmmo == 0 then
+		hint = "[R]  RELOAD"
+	elseif now < hintUntil then
+		hint = "[1-4] weapons  [R] reload  [SHIFT] sprint  [F] sweep  [G] repair"
+	end
+	hintLabel.Text = hint
+	hintLabel.Visible = hint ~= "" and not latest.complete
+
+	-- Follows the cursor rather than sitting at screen centre. Shots are aimed
+	-- where the mouse points, so a fixed centre reticle would be pointing at
+	-- somewhere rounds do not go -- which is the whole complaint it exists to
+	-- answer. `GetMouseLocation` and the GUI both include the inset, so the
+	-- offset needs no correction.
+	staminaBar.Size = UDim2.new(math.clamp(staminaFraction, 0, 1), 0, 1, 0)
+	-- Red while locked out, not merely low: "empty" and "you may not sprint
+	-- yet" are different states, and only the second one explains why the key
+	-- is doing nothing.
+	staminaBar.BackgroundColor3 = if staminaExhausted
+		then ALERT
+		elseif staminaFraction < 0.3 then Color3.fromRGB(220, 170, 90)
+		else GOOD
+	staminaBack.Visible = not latest.complete
+
+	-- Melee cooldown, directly under stamina. All three bars answer the same
+	-- question in different currencies: what can I still do right now.
+	meleeBar.Size = UDim2.new(math.clamp(meleeReadiness, 0, 1), 0, 1, 0)
+	meleeBar.BackgroundColor3 = if meleeReadiness >= 1 then ACCENT else DIM
+	meleeBack.Visible = not latest.complete
+
+	local mouse = UserInputService:GetMouseLocation()
+	crosshair.Position = UDim2.new(0, mouse.X - crosshair.AbsoluteSize.X / 2, 0, mouse.Y - crosshair.AbsoluteSize.Y / 2)
+	hitmarker.Position = UDim2.new(
+		0,
+		mouse.X - hitmarker.AbsoluteSize.X / 2,
+		0,
+		mouse.Y - hitmarker.AbsoluteSize.Y / 2
+	)
+end
+
+--- Fill the end-of-run card.
+---
+--- Extraction and death are the two ways a run ends and they deserve to read
+--- completely differently: one is the thing the whole twelve minutes was for,
+--- the other is losing everything you were carrying.
+function HudController.showSummary(extracted: boolean, zone: string?, credits: number)
+	if extracted then
+		summaryTitle.Text = "EXTRACTED"
+		summaryTitle.TextColor3 = GOOD
+		summaryBody.Text = string.format(
+			"+%d credits banked\nout via %s at %s",
+			credits,
+			tostring(zone or "a pad"),
+			formatClock(latest.elapsed)
+		)
+	else
+		summaryTitle.Text = "LOST"
+		summaryTitle.TextColor3 = ALERT
+		summaryBody.Text = string.format(
+			"%d credits left on the floor\nsurvived %s",
+			credits,
+			formatClock(latest.elapsed)
+		)
+	end
+end
+
+--- Confirmed by the server, never predicted.
+function HudController.showHitmarker()
+	hitmarkerUntil = os.clock() + HITMARKER_SECONDS
+end
+
+--- Build one arrow: a wedge sitting above centre, rotated into place by
+--- `render`. Two stacked bars rather than an image, so it needs no asset.
+local function makeArrow(): Frame
+	local arrow = Instance.new("Frame")
+	arrow.Size = UDim2.new(0, 0, 0, 0)
+	arrow.Position = UDim2.new(0, 0, 0, 0)
+	arrow.BackgroundTransparency = 1
+	arrow.ZIndex = 6
+	arrow.Parent = damageLayer
+
+	for _, spec in
+		{
+			-- { size, offset from centre } -- a short thick bar with a longer
+			-- thin one behind it reads as a chevron pointing outward.
+			{ UDim2.new(0, 46, 0, 5), -120 },
+			{ UDim2.new(0, 26, 0, 5), -134 },
+		}
+	do
+		local bar = Instance.new("Frame")
+		bar.Size = spec[1] :: UDim2
+		bar.Position = UDim2.new(0, -(spec[1] :: UDim2).X.Offset / 2, 0, spec[2] :: number)
+		bar.BackgroundColor3 = ALERT
+		bar.BorderSizePixel = 0
+		bar.ZIndex = 6
+		bar.Parent = arrow
+	end
+
+	return arrow
+end
+
+--- A hit arrived from `from` (world space).
+---
+--- Attackers on nearly the same bearing refresh one arrow rather than stacking
+--- two on top of each other, which just looks like a rendering fault. The
+--- merge test runs against the bearing *at the time of the hit*, which is the
+--- only moment the two are comparable.
+function HudController.showDamageFrom(from: Vector3)
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if root == nil or not root:IsA("BasePart") then
+		return
+	end
+	local camera = workspace.CurrentCamera
+	local look = if camera then camera.CFrame.LookVector else Vector3.zAxis
+	local incoming = DamageArc.bearing(look.X, look.Z, from.X - root.Position.X, from.Z - root.Position.Z)
+
+	for _, mark in damageMarks do
+		local existing = DamageArc.bearing(
+			look.X,
+			look.Z,
+			mark.fromX - root.Position.X,
+			mark.fromZ - root.Position.Z
+		)
+		if DamageArc.shouldMerge(existing, incoming, DAMAGE_MERGE_RADIANS) then
+			mark.fromX, mark.fromZ, mark.at = from.X, from.Z, os.clock()
+			return
+		end
+	end
+
+	-- Oldest out first once the cap is reached: a swarm otherwise rings the
+	-- player in arrows, which conveys less than three do.
+	if #damageMarks >= DAMAGE_MARK_LIMIT then
+		local oldest = table.remove(damageMarks, 1)
+		if oldest then
+			oldest.frame:Destroy()
+		end
+	end
+
+	table.insert(damageMarks, { fromX = from.X, fromZ = from.Z, at = os.clock(), frame = makeArrow() })
+end
+
+--- Pushed by MeleeController every frame. 0..1, 1 = ready.
+---
+--- A cooldown the player cannot see is a button that randomly does nothing,
+--- which is indistinguishable from a bug -- the same reason the reload readout
+--- exists.
+function HudController.setMeleeCooldown(fraction: number, _ready: boolean)
+	meleeReadiness = fraction
+end
+
+--- A short transient line in the middle of the screen.
+---
+--- Shared with the pad/extraction banners rather than given its own element:
+--- two banners that can be on screen at once is a layout problem, and these
+--- are all "something just happened that you need to know about now".
+function HudController.showBanner(text: string, alert: boolean?)
+	if bannerLabel == nil then
+		return
+	end
+	bannerLabel.Text = text
+	bannerLabel.TextColor3 = if alert then ALERT else DIM
+	bannerUntil = os.clock() + NOTICE_SECONDS
+end
+
+--- Pushed by RepairController every frame.
+---
+--- Charges ride the vitals line rather than getting their own element: a
+--- resource you have two of, all run, does not need a bar -- it needs a
+--- number next to the health it restores.
+function HudController.setRepair(chargesLeft: number, progress: number, isRepairing: boolean)
+	repairCharges = chargesLeft
+	repairProgress = progress
+	repairing = isRepairing
+end
+
+--- Pushed by SprintController every frame it ticks.
+function HudController.setStamina(fraction: number, exhausted: boolean)
+	staminaFraction = fraction
+	staminaExhausted = exhausted
+end
+
+--- Pushed by PredictionController when the player switches weapons.
+function HudController.setWeapon(weaponId: string, ammo: number)
+	currentWeapon = weaponId
+	currentAmmo = ammo
+end
+
+--- Pushed on every ammo change, including server `AmmoSync` for weapons the
+--- player is not currently holding — so it must not change which weapon is
+--- displayed, only the count for the one that is.
+function HudController.setAmmo(weaponId: string, ammo: number)
+	if weaponId == currentWeapon then
+		currentAmmo = ammo
+	end
+end
+
+--- Pushed by PredictionController when the server starts or finishes a reload.
+--- Without a readout the weapon simply stops firing for 1.4 seconds and
+--- nothing on screen says why, which is indistinguishable from it being broken.
+function HudController.setReloading(weaponId: string, reloading: boolean, seconds: number)
+	if reloading then
+		reloadingWeapon = weaponId
+		reloadSeconds = seconds
+		reloadEndsAt = os.clock() + seconds
+	elseif reloadingWeapon == weaponId then
+		reloadingWeapon = nil
+	end
 end
 
 function HudController.start()
@@ -233,7 +613,191 @@ function HudController.start()
 	weightBar.BorderSizePixel = 0
 	weightBar.Parent = barBack
 
+	-- Crosshair. A shooter without one asks the player to aim at the middle of
+	-- their monitor from memory, and the tracer arriving somewhere unexpected
+	-- reads as the weapon being broken rather than as the aim being off.
+	crosshair = Instance.new("Frame")
+	crosshair.Size = UDim2.new(0, 26, 0, 26)
+	crosshair.Position = UDim2.new(0.5, -13, 0.5, -13)
+	crosshair.BackgroundTransparency = 1
+	crosshair.Parent = root
+	for _, spec in
+		{
+			{ UDim2.new(0, 2, 0, 8), UDim2.new(0.5, -1, 0, 0) },
+			{ UDim2.new(0, 2, 0, 8), UDim2.new(0.5, -1, 1, -8) },
+			{ UDim2.new(0, 8, 0, 2), UDim2.new(0, 0, 0.5, -1) },
+			{ UDim2.new(0, 8, 0, 2), UDim2.new(1, -8, 0.5, -1) },
+		}
+	do
+		local tick_ = Instance.new("Frame")
+		tick_.Size = spec[1]
+		tick_.Position = spec[2]
+		tick_.BackgroundColor3 = Color3.fromRGB(235, 240, 245)
+		tick_.BackgroundTransparency = 0.25
+		tick_.BorderSizePixel = 0
+		tick_.Parent = crosshair
+	end
+
+	-- Hitmarker, drawn over the crosshair and hidden until a hit is confirmed
+	-- by the *server*. Predicting it would defeat the point: the whole value of
+	-- this mark is that it means the shot really landed.
+	hitmarker = Instance.new("Frame")
+	hitmarker.Size = UDim2.new(0, 22, 0, 22)
+	hitmarker.Position = UDim2.new(0.5, -11, 0.5, -11)
+	hitmarker.BackgroundTransparency = 1
+	hitmarker.Visible = false
+	hitmarker.Parent = root
+	for _, rotation in { 45, -45 } do
+		local stroke = Instance.new("Frame")
+		stroke.Size = UDim2.new(0, 20, 0, 2)
+		stroke.Position = UDim2.new(0.5, -10, 0.5, -1)
+		stroke.BackgroundColor3 = Color3.fromRGB(255, 240, 200)
+		stroke.BorderSizePixel = 0
+		stroke.Rotation = rotation
+		stroke.Parent = hitmarker
+	end
+
+	-- Full-screen red wash on taking damage. Health is a number in the corner;
+	-- this is what makes "I am being hurt right now" land without reading it.
+	hurtVignette = Instance.new("Frame")
+	hurtVignette.Size = UDim2.new(1, 0, 1, 0)
+	hurtVignette.BackgroundColor3 = Color3.fromRGB(150, 20, 20)
+	hurtVignette.BackgroundTransparency = 1
+	hurtVignette.BorderSizePixel = 0
+	hurtVignette.ZIndex = 5
+	hurtVignette.Parent = root
+
 	weightLabel = makeLabel(weightPanel, UDim2.new(1, 0, 0, 26), UDim2.new(0, 0, 0, 0), 20, Enum.TextXAlignment.Left)
+	-- Stamina sits directly under the weight bar: both answer "can I get out of
+	-- here", and splitting them across the screen would make the player look in
+	-- two places for one decision.
+	staminaBack = Instance.new("Frame")
+	staminaBack.Size = UDim2.new(0, 320, 0, 5)
+	staminaBack.Position = UDim2.new(0, 24, 1, -44)
+	staminaBack.BackgroundColor3 = Color3.fromRGB(48, 50, 56)
+	staminaBack.BorderSizePixel = 0
+	staminaBack.Parent = root
+
+	staminaBar = Instance.new("Frame")
+	staminaBar.Size = UDim2.new(1, 0, 1, 0)
+	staminaBar.BackgroundColor3 = ACCENT
+	staminaBar.BorderSizePixel = 0
+	staminaBar.Parent = staminaBack
+
+	-- Damage arrows live in their own centred, full-height layer: rotating a
+	-- child about the screen centre only works if its parent is centred, and
+	-- giving them a layer keeps that fact in one place.
+	damageLayer = Instance.new("Frame")
+	damageLayer.Size = UDim2.new(0, 0, 0, 0)
+	damageLayer.Position = UDim2.new(0.5, 0, 0.5, 0)
+	damageLayer.BackgroundTransparency = 1
+	damageLayer.ZIndex = 6
+	damageLayer.Parent = root
+
+	-- Redeploy. A button rather than a keybind: every letter that reads as
+	-- "again" is already taken (R reloads, 1-4 switch, shift sprints), and a
+	-- control that only appears when the run is over does not need to be
+	-- memorised.
+	redeployButton = Instance.new("TextButton")
+	redeployButton.Size = UDim2.new(0, 260, 0, 52)
+	redeployButton.Position = UDim2.new(0.5, -130, 0.5, 40)
+	redeployButton.BackgroundColor3 = Color3.fromRGB(28, 30, 36)
+	redeployButton.BorderSizePixel = 0
+	redeployButton.Font = Enum.Font.Code
+	redeployButton.TextSize = 22
+	redeployButton.TextColor3 = ACCENT
+	redeployButton.Text = "REDEPLOY  [ENTER]"
+	redeployButton.AutoButtonColor = true
+	redeployButton.Visible = false
+	redeployButton.ZIndex = 7
+	redeployButton.Parent = root
+
+	local buttonStroke = Instance.new("UIStroke")
+	buttonStroke.Color = ACCENT
+	buttonStroke.Thickness = 1
+	buttonStroke.Transparency = 0.4
+	buttonStroke.Parent = redeployButton
+
+	--- Ask, do not assume. The server owns whether this is allowed; the button
+	--- hides itself on the next RunState if the run really restarted.
+	local function askToRedeploy()
+		if not redeployButton.Visible then
+			return
+		end
+		Remotes.event("RedeployRequest"):FireServer()
+	end
+
+	redeployButton.Activated:Connect(askToRedeploy)
+
+	-- Enter does the same thing. Partly because a player who just died reaches
+	-- for a key before a mouse, and partly for a duller reason: GuiObject
+	-- events cannot be driven by the Studio automation bridge -- a synthetic
+	-- click lands inside the button's rect without emitting so much as
+	-- MouseEnter -- so a button is the one control shape that cannot be
+	-- verified without a human. Given how much of this branch turned out to be
+	-- built-but-never-connected, the primary path should be one that can be
+	-- tested. Enter is free during play: R reloads, 1-4 switch, shift sprints.
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed or input.KeyCode ~= Enum.KeyCode.Return then
+			return
+		end
+		askToRedeploy()
+	end)
+
+	-- Run summary. Extraction is the win condition and until now it produced
+	-- nothing on screen at all: the server fired `playerExtracted` with the
+	-- banked value and this handler dropped it, so succeeding was quieter than
+	-- dying. The card is the payoff moment.
+	summaryPanel = Instance.new("Frame")
+	summaryPanel.Size = UDim2.new(0, 420, 0, 132)
+	summaryPanel.Position = UDim2.new(0.5, -210, 0.5, -110)
+	summaryPanel.BackgroundColor3 = Color3.fromRGB(20, 22, 27)
+	summaryPanel.BackgroundTransparency = 0.12
+	summaryPanel.BorderSizePixel = 0
+	summaryPanel.Visible = false
+	summaryPanel.ZIndex = 7
+	summaryPanel.Parent = root
+
+	local summaryStroke = Instance.new("UIStroke")
+	summaryStroke.Color = ACCENT
+	summaryStroke.Thickness = 1
+	summaryStroke.Transparency = 0.5
+	summaryStroke.Parent = summaryPanel
+
+	summaryTitle = makeLabel(summaryPanel, UDim2.new(1, -32, 0, 40), UDim2.new(0, 16, 0, 14), 28, Enum.TextXAlignment.Center)
+	summaryTitle.ZIndex = 8
+	summaryBody = makeLabel(summaryPanel, UDim2.new(1, -32, 0, 66), UDim2.new(0, 16, 0, 56), 17, Enum.TextXAlignment.Center)
+	summaryBody.ZIndex = 8
+	summaryBody.TextWrapped = true
+
+	-- Transient banner for things that happen mid-run and matter: a pad opening
+	-- is a state change the player has been counting down to, and it was only
+	-- ever visible as the pad line quietly changing colour.
+	bannerLabel = makeLabel(root, UDim2.new(0, 620, 0, 30), UDim2.new(0.5, -310, 0, 128), 22, Enum.TextXAlignment.Center)
+	bannerLabel.TextColor3 = GOOD
+	bannerLabel.Visible = false
+	bannerLabel.ZIndex = 7
+
+	-- Hints sit under the vitals line, where the player is already looking for
+	-- ammo when they run dry.
+	hintLabel = makeLabel(root, UDim2.new(0, 420, 0, 22), UDim2.new(1, -444, 1, -32), 15, Enum.TextXAlignment.Right)
+	hintLabel.TextColor3 = ACCENT
+	hintLabel.Visible = false
+	hintUntil = os.clock() + HINT_SECONDS
+
+	meleeBack = Instance.new("Frame")
+	meleeBack.Size = UDim2.new(0, 320, 0, 3)
+	meleeBack.Position = UDim2.new(0, 24, 1, -37)
+	meleeBack.BackgroundColor3 = Color3.fromRGB(48, 50, 56)
+	meleeBack.BorderSizePixel = 0
+	meleeBack.Parent = root
+
+	meleeBar = Instance.new("Frame")
+	meleeBar.Size = UDim2.new(1, 0, 1, 0)
+	meleeBar.BackgroundColor3 = ACCENT
+	meleeBar.BorderSizePixel = 0
+	meleeBar.Parent = meleeBack
+
 	statusLabel = makeLabel(root, UDim2.new(0, 520, 0, 22), UDim2.new(0, 24, 1, -30), 16, Enum.TextXAlignment.Left)
 	vitalsLabel = makeLabel(root, UDim2.new(0, 200, 0, 30), UDim2.new(1, -224, 1, -60), 24, Enum.TextXAlignment.Right)
 
@@ -251,7 +815,37 @@ function HudController.start()
 	LookController.setThreatTier(2)
 
 	Remotes.event("RunEvent").OnClientEvent:Connect(function(payload: any)
-		if typeof(payload) ~= "table" or payload.kind ~= "overseerBark" then
+		if typeof(payload) ~= "table" then
+			return
+		end
+
+		-- Everything except the bark used to fall out of this handler on the
+		-- first line, so extraction, run end and pad openings all arrived and
+		-- were discarded.
+		if payload.kind == "padOpened" then
+			bannerLabel.Text = string.format("%s PAD OPEN", string.upper(tostring(payload.zone)))
+			bannerLabel.TextColor3 = GOOD
+			bannerUntil = os.clock() + BANNER_SECONDS
+			return
+		elseif payload.kind == "playerExtracted" then
+			if payload.playerId == player.UserId then
+				HudController.showSummary(true, payload.zone, payload.value or 0)
+			else
+				bannerLabel.Text = "A SQUADMATE EXTRACTED"
+				bannerLabel.TextColor3 = DIM
+				bannerUntil = os.clock() + BANNER_SECONDS
+			end
+			return
+		elseif payload.kind == "playerDied" then
+			if payload.playerId == player.UserId then
+				HudController.showSummary(false, nil, payload.droppedValue or 0)
+			end
+			return
+		elseif payload.kind == "runEnded" then
+			return
+		end
+
+		if payload.kind ~= "overseerBark" then
 			return
 		end
 		local bark = payload.bark
@@ -265,10 +859,19 @@ function HudController.start()
 		end
 	end)
 
+	Remotes.event("DamageFrom").OnClientEvent:Connect(function(payload: any)
+		if typeof(payload) ~= "table" or typeof(payload.from) ~= "Vector3" then
+			return
+		end
+		HudController.showDamageFrom(payload.from)
+	end)
+
 	Remotes.event("RunState").OnClientEvent:Connect(function(payload: any)
 		if typeof(payload) ~= "table" then
 			return
 		end
+		latest.canRedeploy = payload.canRedeploy == true
+		latest.endReason = payload.endReason
 		latest.remaining = payload.remaining or latest.remaining
 		latest.elapsed = payload.elapsed or latest.elapsed
 		latest.openPads = payload.openPads or latest.openPads

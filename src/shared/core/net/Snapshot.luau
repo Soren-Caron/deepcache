@@ -13,11 +13,18 @@
 	  entity   id             uint16   2
 	           x, y, z        int16    6     0.05-stud grid, relative to origin
 	           yaw            uint8    1
-	           state          uint8    1
+	           state+kind     uint8    1     bits0-2 = state, bits3-5 = kind
 	           hpPct          uint8    1
 
 	Capacity is (900 - 5) / 11 = 81 entities. Interest management caps at 32,
 	so there is headroom to add a field later without a format break.
+
+	`kind` shares the state byte rather than taking a twelfth. There are six
+	states and six entity kinds, three bits each, and the byte was carrying a
+	value of 0-5 in isolation. The client needs kind to draw a Warden
+	differently from a Skitter — without it every enemy is the same grey box —
+	and paying a byte per entity per tick for information that fits in bits
+	already being sent would be a real bandwidth cost for no reason.
 
 	Divergence from the original spec: the plan described a 4-byte changed-entity
 	bitfield prefix for deltas, indexed by position in the baseline. That
@@ -79,6 +86,27 @@ for name, code in STATE_TO_CODE do
 	CODE_TO_STATE[code] = name
 end
 
+--- Order is the wire format. Appending is safe; reordering or removing breaks
+--- every client that has not shipped the same change.
+local KIND_TO_CODE: { [Types.EntityKind]: number } = {
+	Skitter = 0,
+	Sentry = 1,
+	Hauler = 2,
+	Lancer = 3,
+	Warden = 4,
+	Reclaimer = 5,
+}
+
+local CODE_TO_KIND: { [number]: Types.EntityKind } = {}
+for name, code in KIND_TO_CODE do
+	CODE_TO_KIND[code] = name
+end
+
+local STATE_MASK = 0x07
+local KIND_SHIFT = 3
+--- Three bits, so six kinds fit with two values spare and bits 6-7 untouched.
+local KIND_MASK = 0x07
+
 Snapshot.STATE_TO_CODE = STATE_TO_CODE
 Snapshot.CODE_TO_STATE = CODE_TO_STATE
 
@@ -105,25 +133,34 @@ function Snapshot.toRecord(view: Types.EntityView, origin: Types.Vec3): Record
 	if code == nil then
 		error(`Snapshot.toRecord: unknown state "{tostring(view.state)}"`, 2)
 	end
+	local kindCode = KIND_TO_CODE[view.kind]
+	if kindCode == nil then
+		error(`Snapshot.toRecord: unknown kind "{tostring(view.kind)}"`, 2)
+	end
 	return {
 		id = id,
 		x = Quantize.encodePosition(view.pos.x - origin.x),
 		y = Quantize.encodePosition(view.pos.y - origin.y),
 		z = Quantize.encodePosition(view.pos.z - origin.z),
 		yaw = Quantize.encodeYaw(view.yaw),
-		state = code,
+		state = bit32.bor(code, bit32.lshift(kindCode, KIND_SHIFT)),
 		hp = Quantize.encodeUnit(view.hpPct),
 	}
 end
 
 --- Wire integers -> EntityView, back in world space.
 function Snapshot.fromRecord(record: Record, origin: Types.Vec3): Types.EntityView
-	local state = CODE_TO_STATE[record.state]
+	local state = CODE_TO_STATE[bit32.band(record.state, STATE_MASK)]
 	if state == nil then
 		error(`Snapshot.fromRecord: unknown state code {record.state}`, 2)
 	end
+	local kind = CODE_TO_KIND[bit32.band(bit32.rshift(record.state, KIND_SHIFT), KIND_MASK)]
+	if kind == nil then
+		error(`Snapshot.fromRecord: unknown kind code in state byte {record.state}`, 2)
+	end
 	return {
 		id = record.id,
+		kind = kind,
 		pos = {
 			x = Quantize.decodePosition(record.x) + origin.x,
 			y = Quantize.decodePosition(record.y) + origin.y,

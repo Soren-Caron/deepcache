@@ -487,4 +487,91 @@ t.describe("sim/Steering facingYaw", function()
 		-- Snapping to zero when an entity stops looks like a glitch.
 		expect(Steering.facingYaw(v3(0, 0, 0), 1.234)).toEqual(1.234)
 	end)
+
+	t.it("holds facing for an offset below the caller's minimum magnitude", function()
+		-- The bug this closes: a 0.3-stud offset is numerically fine, so the
+		-- EPSILON floor accepts it, but its *direction* swings through tens of
+		-- degrees per tick as the target shuffles. Enemies crowded onto a
+		-- player spun violently as a result.
+		expect(Steering.facingYaw(v3(0.3, 0, 0), 1.234, 2)).toEqual(1.234)
+		-- Above the floor it still tracks normally.
+		expect(Steering.facingYaw(v3(9, 0, 0), 1.234, 2)).approx(math.pi / 2, 1e-9)
+	end)
+end)
+
+t.describe("sim/Steering angleDelta", function()
+	t.it("takes the short way round the seam", function()
+		-- 350 degrees left is really 10 degrees right.
+		local from = math.rad(355)
+		local to = math.rad(5)
+		expect(Steering.angleDelta(from, to)).approx(math.rad(10), 1e-9)
+		expect(Steering.angleDelta(to, from)).approx(math.rad(-10), 1e-9)
+	end)
+
+	t.it("is zero for identical angles and for full turns", function()
+		expect(Steering.angleDelta(1.1, 1.1)).approx(0, 1e-9)
+		expect(Steering.angleDelta(1.1, 1.1 + math.pi * 2)).approx(0, 1e-9)
+	end)
+
+	t.it("never exceeds half a turn in either direction", function()
+		for degrees = -720, 720, 7 do
+			local delta = Steering.angleDelta(0, math.rad(degrees))
+			expect(math.abs(delta) <= math.pi + 1e-9).toBeTruthy()
+		end
+	end)
+end)
+
+t.describe("sim/Steering slewYaw", function()
+	t.it("caps a turn at the rate limit", function()
+		-- 3 rad/s for 0.05 s is 0.15 rad, however far away the target is.
+		-- Deliberately not +/- math.pi here: exactly half a turn is a tie, and
+		-- that case is pinned separately below.
+		expect(Steering.slewYaw(0, 2.0, 3, 0.05)).approx(0.15, 1e-9)
+		expect(Steering.slewYaw(0, -2.0, 3, 0.05)).approx(-0.15, 1e-9)
+	end)
+
+	t.it("resolves an exact half-turn consistently rather than jittering", function()
+		-- A target dead behind is equally close either way. The choice does not
+		-- matter; making the same choice every tick does, or the entity picks a
+		-- new direction each frame and vibrates in place.
+		local first = Steering.slewYaw(0, math.pi, 3, 0.05)
+		expect(Steering.slewYaw(0, math.pi, 3, 0.05)).toEqual(first)
+		expect(Steering.slewYaw(0, -math.pi, 3, 0.05)).toEqual(first)
+	end)
+
+	t.it("snaps exactly when the remaining turn fits inside one step", function()
+		expect(Steering.slewYaw(0, 0.1, 3, 0.05)).approx(0.1, 1e-9)
+	end)
+
+	t.it("turns the short way across the seam rather than unwinding", function()
+		local from = math.rad(355)
+		local next_ = Steering.slewYaw(from, math.rad(5), 3, 0.05)
+		-- Must increase past 360, not sweep back down through 180.
+		expect(Steering.angleDelta(from, next_) > 0).toBeTruthy()
+	end)
+
+	t.it("converges rather than oscillating around the target", function()
+		local yaw = 0
+		local desired = math.rad(170)
+		for _ = 1, 200 do
+			yaw = Steering.slewYaw(yaw, desired, 3, 0.05)
+		end
+		expect(Steering.angleDelta(yaw, desired)).approx(0, 1e-9)
+	end)
+
+	t.it("cannot reverse facing in a single tick", function()
+		-- The visible symptom: an instant 180 at 20 Hz reads as a spin.
+		local flipped = Steering.slewYaw(0, math.pi, 3, 0.05)
+		expect(math.abs(flipped) < math.pi / 2).toBeTruthy()
+	end)
+
+	t.it("holds facing for non-finite or non-positive inputs", function()
+		expect(Steering.slewYaw(1.5, 0 / 0, 3, 0.05)).toEqual(1.5)
+		expect(Steering.slewYaw(1.5, 2, 3, 0)).toEqual(1.5)
+		expect(Steering.slewYaw(1.5, 2, 3, -1)).toEqual(1.5)
+		expect(Steering.slewYaw(1.5, 2, 3, 0 / 0)).toEqual(1.5)
+		expect(Steering.slewYaw(1.5, 2, 3, math.huge)).toEqual(1.5)
+		expect(Steering.slewYaw(1.5, 2, 0, 0.05)).toEqual(1.5)
+		expect(Steering.slewYaw(1.5, 2, -3, 0.05)).toEqual(1.5)
+	end)
 end)

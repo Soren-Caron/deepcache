@@ -33,6 +33,7 @@ local DamageModel = require(Shared.core.sim.DamageModel)
 local EntityState = require(Shared.core.sim.EntityState)
 local FireValidation = require(Shared.core.sim.FireValidation)
 local Raycast = require(Shared.core.sim.Raycast)
+local Reload = require(Shared.core.sim.Reload)
 local History = require(Shared.core.net.History)
 local Types = require(Shared.core.Types)
 
@@ -52,6 +53,7 @@ type BeamState = { targetId: number?, seconds: number, lastTick: number }
 type PlayerState = {
 	buckets: { [string]: FireValidation.Bucket },
 	ammo: { [string]: number },
+	reload: Reload.State,
 	queue: { { request: Wire.FireRequest, receivedAt: number } },
 	beams: { [string]: BeamState },
 }
@@ -78,6 +80,9 @@ export type Metrics = {
 	hits: number,
 	rejectedRate: number,
 	rejectedAmmo: number,
+	rejectedReloading: number,
+	reloadsStarted: number,
+	reloadsCompleted: number,
 	originSubstituted: number,
 	rewindClamped: number,
 }
@@ -114,6 +119,9 @@ local metrics: Metrics = {
 	hits = 0,
 	rejectedRate = 0,
 	rejectedAmmo = 0,
+	rejectedReloading = 0,
+	reloadsStarted = 0,
+	reloadsCompleted = 0,
 	originSubstituted = 0,
 	rewindClamped = 0,
 }
@@ -144,7 +152,8 @@ local function stateFor(player: Player): PlayerState
 		ammo[name] = weapon.magazine
 	end
 
-	local created: PlayerState = { buckets = buckets, ammo = ammo, queue = {}, beams = {} }
+	local created: PlayerState =
+		{ buckets = buckets, ammo = ammo, queue = {}, beams = {}, reload = Reload.new() }
 	players[player] = created
 	return created
 end
@@ -168,14 +177,68 @@ function CombatService.resetMetrics()
 	}
 end
 
---- Refill a magazine. Reload timing and UI land in M2; this is the hook.
+--- Refill immediately. This is the *completion* of a reload, and the path
+--- diagnostics use to skip the wait; players reach it through
+--- `requestReload` and the timer in `core/sim/Reload`.
 function CombatService.reload(player: Player, weaponId: string)
 	local weapon = (WeaponsConfig :: any)[weaponId]
 	if weapon == nil then
 		return
 	end
-	stateFor(player).ammo[weaponId] = weapon.magazine
+	local state = stateFor(player)
+	Reload.cancel(state.reload, weaponId)
+	state.ammo[weaponId] = weapon.magazine
 	Remotes.event("AmmoSync"):FireClient(player, { weaponId = weaponId, ammo = weapon.magazine })
+end
+
+--- Begin a timed reload. Returns `(false, reason)` rather than throwing: the
+--- caller is a remote and the payload is attacker-controlled.
+function CombatService.requestReload(player: Player, weaponId: unknown): (boolean, string?)
+	if typeof(weaponId) ~= "string" then
+		return false, "shape"
+	end
+	local weapon = (WeaponsConfig :: any)[weaponId]
+	if weapon == nil or weapon.magazine == nil then
+		-- A beam has no magazine to reload.
+		return false, "no_magazine"
+	end
+
+	local state = stateFor(player)
+	local ok, reason = Reload.begin(
+		state.reload,
+		weaponId,
+		weapon,
+		state.ammo[weaponId] or 0,
+		TickService.now()
+	)
+	if not ok then
+		return false, reason
+	end
+
+	metrics.reloadsStarted += 1
+	Remotes.event("ReloadState"):FireClient(player, {
+		weaponId = weaponId,
+		reloading = true,
+		seconds = weapon.reloadSeconds,
+	})
+	return true
+end
+
+--- Finish any reloads whose timer has elapsed. Registered inside the combat
+--- tick phase, so a reload completes on a tick boundary like everything else
+--- rather than whenever a heartbeat happened to fire.
+local function stepReloads(now: number)
+	for player, state in players do
+		for _, weaponId in Reload.collect(state.reload, now) do
+			CombatService.reload(player, weaponId)
+			metrics.reloadsCompleted += 1
+			Remotes.event("ReloadState"):FireClient(player, {
+				weaponId = weaponId,
+				reloading = false,
+				seconds = 0,
+			})
+		end
+	end
 end
 
 --------------------------------------------------------------------------------
@@ -313,7 +376,14 @@ local function resolve(player: Player, request: Wire.FireRequest, now: number)
 		return
 	end
 
-	-- 3. Ammo
+	-- 3. Ammo. Mid-reload is rejected before the count is even read: a weapon
+	-- being reloaded is not a weapon you may fire, and letting the shot through
+	-- would make cancelling the animation client-side a free instant reload.
+	if Reload.isReloading(state.reload, request.weaponId, now) then
+		metrics.rejectedReloading += 1
+		reject(player, request.seq, "reloading")
+		return
+	end
 	local remaining = state.ammo[request.weaponId] or 0
 	if remaining <= 0 then
 		metrics.rejectedAmmo += 1
@@ -610,6 +680,10 @@ function CombatService.init()
 		CombatService.submit(player, request)
 	end)
 
+	Remotes.event("ReloadRequest").OnServerEvent:Connect(function(player, weaponId)
+		CombatService.requestReload(player, weaponId)
+	end)
+
 	Players.PlayerRemoving:Connect(function(player)
 		players[player] = nil
 	end)
@@ -618,6 +692,9 @@ end
 --- Registered as a TickService phase.
 function CombatService.step(_tick: number, dt: number)
 	local now = TickService.now()
+	-- Before resolving queued shots: a reload that completed this tick should
+	-- refill the magazine the shot is about to check, not one tick later.
+	stepReloads(now)
 	CombatService.stepProjectiles(dt)
 	for player, state in players do
 		if player.Parent == nil then

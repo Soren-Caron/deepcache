@@ -77,6 +77,7 @@ function History.record(self: History, tick: number, time: number, entities: { T
 	for i, e in entities do
 		snapshot[i] = {
 			id = e.id,
+			kind = e.kind,
 			pos = { x = e.pos.x, y = e.pos.y, z = e.pos.z },
 			yaw = e.yaw,
 			state = e.state,

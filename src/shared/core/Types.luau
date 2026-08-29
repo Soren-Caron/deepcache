@@ -16,6 +16,10 @@ export type EntityStateName = "idle" | "move" | "attack" | "stagger" | "death" |
 --- The replicated view of an entity: exactly what fits in a snapshot record.
 export type EntityView = {
 	id: number,
+	--- Packed into the spare bits of the state byte, so it costs no wire
+	--- bandwidth. The client needs it to draw a Warden differently from a
+	--- Skitter; without it every enemy renders as the same grey box.
+	kind: EntityKind,
 	pos: Vec3,
 	yaw: number, -- radians
 	state: EntityStateName,

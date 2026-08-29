@@ -13,8 +13,9 @@
 	a misspelled field. Full type checking needs luau-lsp, which is a separate
 	tool and a later addition.
 
-	It also lints cross-service relative requires, which compile fine and fail
-	only at runtime. See lintCrossServiceRequires below.
+	It also lints cross-service relative requires and missing module returns,
+	both of which compile fine and fail only at runtime. See
+	lintCrossServiceRequires and lintModuleReturn below.
 ]]
 
 local fs = require("@lune/fs")
@@ -42,10 +43,19 @@ local checked = 0
 	`game:GetService("ReplicatedStorage").Shared` are the fix, and this catches
 	a regression at build time instead of on boot.
 ]]
+local SERVICE_OF: { [string]: string } = {
+	server = "ServerScriptService",
+	client = "StarterPlayerScripts",
+	replicatedfirst = "ReplicatedFirst",
+}
+
 local function lintCrossServiceRequires(path: string, source: string)
-	local isServer = string.match(path, "^src/server/") ~= nil
-	local isClient = string.match(path, "^src/client/") ~= nil
-	if not (isServer or isClient) then
+	-- Keyed on the subtree rather than on a list of two, so a new mapped
+	-- subtree is covered by adding one line to SERVICE_OF instead of being
+	-- silently exempt.
+	local subtree = string.match(path, "^src/([^/]+)/")
+	local service = subtree and SERVICE_OF[subtree]
+	if service == nil then
 		return
 	end
 
@@ -55,11 +65,47 @@ local function lintCrossServiceRequires(path: string, source: string)
 				path = path,
 				message = `cross-service relative require: require("{pattern}")\n`
 					.. `    src/shared maps to ReplicatedStorage.Shared but this file lives under `
-					.. `{if isServer then "ServerScriptService" else "StarterPlayerScripts"}.\n`
+					.. `{service}.\n`
 					.. `    Use: local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")`,
 			})
 		end
 	end
+end
+
+--[[
+	Missing module return lint.
+
+	A ModuleScript that never returns compiles cleanly and syncs cleanly. Luau
+	then hands the requiring code `true`, and the first thing that touches a
+	field on it dies with "attempt to index boolean" pointing at the *caller*,
+	which says nothing about the file that is actually wrong.
+
+	Cost a real cycle on config/Boot: the syntax check passed, encoding passed,
+	rojo built, and the failure surfaced four test cases away from its cause.
+	Same shape as the BOM guard — a whole-file defect that only the file's own
+	first line can see.
+
+	`.server.luau` and `.client.luau` are Scripts and LocalScripts, which
+	correctly return nothing.
+]]
+local function lintModuleReturn(path: string, source: string)
+	if string.match(path, "^src/") == nil then
+		return
+	end
+	if string.match(path, "%.server%.luau$") or string.match(path, "%.client%.luau$") then
+		return
+	end
+	-- Top of line only: a `return` indented inside a function is not the
+	-- module's return, and matching one would defeat the whole check.
+	if string.match(source, "\nreturn[%s\n]") or string.match(source, "^return[%s\n]") then
+		return
+	end
+	table.insert(failures, {
+		path = path,
+		message = "module never returns\n"
+			.. "    A ModuleScript with no top-level `return` yields `true` to its callers,\n"
+			.. "    and fails as \"attempt to index boolean\" at the call site instead of here.",
+	})
 end
 
 local function scan(dir: string)
@@ -80,6 +126,7 @@ local function scan(dir: string)
 				table.insert(failures, { path = full, message = tostring(err) })
 			else
 				lintCrossServiceRequires(full, source)
+				lintModuleReturn(full, source)
 			end
 		end
 	end

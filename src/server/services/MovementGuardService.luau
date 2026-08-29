@@ -31,6 +31,10 @@ type Tracked = {
 }
 
 local tracked: { [Player]: Tracked } = {}
+--- Recent flagged frames, for the `movementViolations` diagnostic. Small: this
+--- answers "what just happened to me", it is not analytics.
+local MAX_RECENT_VIOLATIONS = 24
+local recentViolations: { string } = {}
 local params = table.clone(MovementGuard.DEFAULT_PARAMS)
 
 params.speedMargin = NetcodeConfig.SPEED_MARGIN
@@ -38,6 +42,7 @@ params.teleportThreshold = NetcodeConfig.TELEPORT_THRESHOLD
 params.decayPerSecond = NetcodeConfig.VIOLATION_DECAY_PER_SEC
 params.correctAt = NetcodeConfig.VIOLATION_CORRECT_AT
 params.kickAt = NetcodeConfig.VIOLATION_KICK_AT
+params.windowSeconds = NetcodeConfig.VIOLATION_WINDOW_SECONDS
 params.maxFallSpeed = NetcodeConfig.MAX_FALL_SPEED
 
 --- The upward budget is derived from the engine's *live* jump settings rather
@@ -98,7 +103,26 @@ function MovementGuardService.setWorldBounds(min: Types.Vec3, max: Types.Vec3)
 	params.worldMax = max
 end
 
+--- Players the client has told us are sprinting. Trusted only as far as it
+--- costs: a client claiming to sprint gets a wider speed budget, never a
+--- different position. The worst a liar achieves is the sprint multiplier they
+--- could have had by pressing the key, which is why this is a remote rather
+--- than something the guard tries to infer.
+local sprinting: { [Player]: boolean } = {}
+
+function MovementGuardService.isSprinting(player: Player): boolean
+	return sprinting[player] == true
+end
+
 function MovementGuardService.init()
+	Remotes.event("SprintState").OnServerEvent:Connect(function(player, value)
+		sprinting[player] = value == true
+	end)
+
+	Players.PlayerRemoving:Connect(function(player)
+		sprinting[player] = nil
+	end)
+
 	Players.PlayerRemoving:Connect(function(player)
 		tracked[player] = nil
 	end)
@@ -150,14 +174,45 @@ function MovementGuardService.step(_tick: number, dt: number)
 
 		if previous ~= nil then
 			local elapsed = math.max(now - entry.lastTime, 1e-6)
+			local allowance = speedProvider(player)
 			local verdict = MovementGuard.check(
 				entry.state,
 				previous,
 				position,
 				elapsed,
-				speedProvider(player),
+				allowance,
 				params
 			)
+
+			-- Keep the last few flagged frames with enough context to say *which*
+			-- budget overran and by how much. The counters say a violation
+			-- happened; they cannot say whether it was a jump charged against a
+			-- walk speed, a sprint the guard was never told about, or a genuine
+			-- hitch -- and those have completely different fixes.
+			if #verdict.reasons > 0 then
+				local dx = position.x - previous.x
+				local dy = position.y - previous.y
+				local dz = position.z - previous.z
+				local horizontal = math.sqrt(dx * dx + dz * dz)
+				table.insert(recentViolations, string.format(
+					-- Labelled "lastTick" on purpose: the judgement is made over a
+					-- window, so these are the final sample, not what was scored.
+					-- Reporting them as the decision inputs would send the next
+					-- investigation looking at the wrong number.
+					"%s lastTick dt=%.3f horiz=%.1f/s (allow %.1f/s) vert=%+.1f/s allowance=%.1f sprint=%s score=%.2f -> %s",
+					table.concat(verdict.reasons, "+"),
+					elapsed,
+					horizontal / elapsed, allowance * params.speedMargin,
+					dy / elapsed,
+					allowance,
+					tostring(sprinting[player] == true),
+					verdict.score,
+					verdict.action
+				))
+				if #recentViolations > MAX_RECENT_VIOLATIONS then
+					table.remove(recentViolations, 1)
+				end
+			end
 
 			if verdict.action == "correct" and verdict.correctedPos then
 				entry.corrections += 1
@@ -179,6 +234,10 @@ function MovementGuardService.step(_tick: number, dt: number)
 		entry.lastPos = position
 		entry.lastTime = now
 	end
+end
+
+function MovementGuardService.getViolations(): { string }
+	return recentViolations
 end
 
 function MovementGuardService.getMetrics(): { players: number, totalViolations: number, corrections: number }

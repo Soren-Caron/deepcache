@@ -11,7 +11,7 @@ local Types = require("../src/shared/core/Types")
 local v3 = Types.vec3
 
 local function view(id: number, x: number, z: number): Types.EntityView
-	return { id = id, pos = v3(x, 0, z), yaw = 0, state = "move", hpPct = 1 }
+	return { id = id, kind = "Skitter" :: any, pos = v3(x, 0, z), yaw = 0, state = "move", hpPct = 1 }
 end
 
 --------------------------------------------------------------------------------
@@ -308,6 +308,28 @@ t.describe("sim/MovementGuard", function()
 	local DT = 1 / 20
 	local SPEED = 16
 
+	--- Drive `ticks` steps of constant per-tick movement and return the last
+	--- verdict.
+	---
+	--- Speed is judged over `windowSeconds` of accumulated movement rather than
+	--- per tick, because one tick of a replicated position says more about when
+	--- packets arrived than about how fast the player moved. A cheat therefore
+	--- has to be *driven* to be detected, which is what this exists for -- a
+	--- single call now only accumulates.
+	local function sustain(state, horizontalPerTick: number, verticalPerTick: number, ticks: number, speed: number?)
+		local x, y = 0, 0
+		local verdict
+		for _ = 1, ticks do
+			local nextX, nextY = x + horizontalPerTick, y + verticalPerTick
+			verdict = MovementGuard.check(state, v3(x, y, 0), v3(nextX, nextY, 0), DT, speed or SPEED, P)
+			x, y = nextX, nextY
+		end
+		return verdict
+	end
+
+	--- Ticks needed to close one judging window.
+	local WINDOW_TICKS = math.ceil(P.windowSeconds / DT)
+
 	t.it("passes ordinary movement", function()
 		local state = MovementGuard.new()
 		local verdict = MovementGuard.check(state, v3(0, 0, 0), v3(0, 0, SPEED * DT), DT, SPEED, P)
@@ -325,28 +347,123 @@ t.describe("sim/MovementGuard", function()
 		expect(#verdict.reasons).toEqual(0)
 	end)
 
-	t.it("does not act on a single speed violation", function()
-		-- One bad frame is ordinary. Punishing it would flag honest players on
-		-- bad connections.
+	t.it("does not act on a single fast frame", function()
+		-- One bad frame is ordinary -- a lag spike, a ramp, knockback, or simply
+		-- two replication packets landing on one server tick. It is not even
+		-- scored now: speed is judged over a window, and a single sample does
+		-- not close one.
 		local state = MovementGuard.new()
 		local verdict = MovementGuard.check(state, v3(0, 0, 0), v3(0, 0, 3), DT, SPEED, P)
-		expect(#verdict.reasons).toEqual(1)
+		expect(#verdict.reasons).toEqual(0)
 		expect(verdict.action).toEqual("ok")
-		expect(state.score > 0).toBeTruthy()
+		expect(state.score).toEqual(0)
+	end)
+
+	t.it("tolerates replication bursting by an honest walker", function()
+		-- The bug this window exists for, reproduced from a real session: the
+		-- server samples a replicated position on its own tick, but positions
+		-- arrive in bursts -- some ticks see nothing, the next absorbs two
+		-- packets' worth. Per-tick that reads as 2x walk speed and scored a
+		-- violation roughly once a second against a decay of one a second, so
+		-- an honest player ratcheted up to `correctAt` and got teleported
+		-- backwards mid-stride.
+		local state = MovementGuard.new()
+		local x = 0
+		for tick = 1, 200 do
+			-- Same average speed as walking, delivered every third tick.
+			local step = if tick % 3 == 0 then SPEED * DT * 3 else 0
+			MovementGuard.check(state, v3(x, 0, 0), v3(x + step, 0, 0), DT, SPEED, P)
+			x += step
+		end
+		expect(state.score).toEqual(0)
+		expect(state.totalViolations).toEqual(0)
+	end)
+
+	t.it("budgets a sprint that began mid-window as a sprint", function()
+		-- The other half of the same report. The client raises its own WalkSpeed
+		-- the instant sprint starts and only then tells the server, so for one
+		-- round trip the guard was budgeting 16 against a player doing 25.6.
+		-- Taking the most permissive allowance seen in the window absorbs it.
+		local state = MovementGuard.new()
+		local x = 0
+		for tick = 1, WINDOW_TICKS do
+			-- Sprinting the whole time; the server only learns of it partway.
+			local known = if tick > 3 then 25.6 else 16
+			local step = 25.6 * DT
+			MovementGuard.check(state, v3(x, 0, 0), v3(x + step, 0, 0), DT, known, P)
+			x += step
+		end
+		expect(state.score).toEqual(0)
 	end)
 
 	t.it("escalates to correction under a sustained pattern", function()
+		-- Detection now costs about one window before the first violation is
+		-- even scored, and several more before the score reaches `correctAt`.
+		-- That latency is the price of not punishing replication jitter, and a
+		-- real speed hack sustains for far longer than this.
 		local state = MovementGuard.new()
 		local action = "ok"
-		for i = 1, 20 do
-			local from = v3(0, 0, i * 3)
-			local verdict = MovementGuard.check(state, from, v3(0, 0, i * 3 + 3), DT, SPEED, P)
+		local x = 0
+		for _ = 1, 400 do
+			local verdict = MovementGuard.check(state, v3(x, 0, 0), v3(x + 3, 0, 0), DT, SPEED, P)
+			x += 3
 			action = verdict.action
 			if action ~= "ok" then
 				break
 			end
 		end
 		expect(action).toEqual("correct")
+	end)
+
+	t.it("does not keep correcting after the player stops offending", function()
+		-- Regression for the bug behind a "movement stutters and cancels itself"
+		-- report. The action branch used to read only the standing score, so once
+		-- it crossed `correctAt` every following tick issued another correction
+		-- until the score decayed under the threshold -- at a decay of one per
+		-- second from a threshold of five, several seconds of being teleported
+		-- backwards twenty times a second. A live session recorded 7 violations
+		-- and 109 corrections.
+		local state = MovementGuard.new()
+		-- Push the score well clear of the threshold, not just onto it. A single
+		-- teleport lands exactly on `correctAt`, and one decay tick then drops it
+		-- under -- which would make this test pass against the bug it exists to
+		-- catch. Three teleports leave enough score to keep the buggy branch
+		-- firing for seconds.
+		for _ = 1, 3 do
+			MovementGuard.check(state, v3(0, 0, 0), v3(0, 0, 500), DT, SPEED, P)
+		end
+		expect(state.score >= P.correctAt * 2).toBeTruthy()
+
+		-- Now behave. The score is still elevated, but there is no new evidence.
+		local corrections = 0
+		local x = 0
+		for _ = 1, 60 do
+			MovementGuard.decay(state, DT, P)
+			local verdict = MovementGuard.check(state, v3(x, 0, 0), v3(x + SPEED * DT, 0, 0), DT, SPEED, P)
+			x += SPEED * DT
+			if verdict.action == "correct" then
+				corrections += 1
+			end
+		end
+		expect(corrections).toEqual(0)
+	end)
+
+	t.it("still corrects a cheater who keeps offending", function()
+		-- The other side of it: requiring fresh evidence must not make the guard
+		-- toothless. Someone sustaining a hack produces evidence every window.
+		local state = MovementGuard.new()
+		MovementGuard.check(state, v3(0, 0, 0), v3(0, 0, 500), DT, SPEED, P)
+		local corrections = 0
+		local x = 0
+		for _ = 1, 200 do
+			MovementGuard.decay(state, DT, P)
+			local verdict = MovementGuard.check(state, v3(x, 0, 0), v3(x + 8, 0, 0), DT, SPEED, P)
+			x += 8
+			if verdict.action == "correct" or verdict.action == "kick" then
+				corrections += 1
+			end
+		end
+		expect(corrections > 0).toBeTruthy()
 	end)
 
 	t.it("flags an outright teleport immediately", function()
@@ -368,10 +485,10 @@ t.describe("sim/MovementGuard", function()
 
 	t.it("scales the penalty with how far past budget the frame went", function()
 		local mild = MovementGuard.new()
-		MovementGuard.check(mild, v3(0, 0, 0), v3(0, 0, 1.5), DT, SPEED, P)
+		sustain(mild, 1.5, 0, WINDOW_TICKS)
 
 		local severe = MovementGuard.new()
-		MovementGuard.check(severe, v3(0, 0, 0), v3(0, 0, 30), DT, SPEED, P)
+		sustain(severe, 30, 0, WINDOW_TICKS)
 
 		expect(severe.score > mild.score).toBeTruthy()
 	end)
@@ -445,7 +562,7 @@ t.describe("sim/MovementGuard", function()
 		-- The fix must not become a loophole: vertical leniency cannot excuse
 		-- horizontal cheating just because the player is off the ground.
 		local state = MovementGuard.new()
-		local verdict = MovementGuard.check(state, v3(0, 0, 0), v3(10, 2.66, 0), DT, SPEED, P)
+		local verdict = sustain(state, 10, 2.66, WINDOW_TICKS)
 		expect(table.find(verdict.reasons, "speed")).never().toBeNil()
 		expect(state.score > 0).toBeTruthy()
 	end)
@@ -454,7 +571,7 @@ t.describe("sim/MovementGuard", function()
 		-- Going UP faster than a jump is not something the engine does, so the
 		-- rise budget stays tight enough to catch it.
 		local state = MovementGuard.new()
-		local verdict = MovementGuard.check(state, v3(0, 0, 0), v3(0, 20, 0), DT, SPEED, P)
+		local verdict = sustain(state, 0, 20, WINDOW_TICKS)
 		expect(table.find(verdict.reasons, "vertical_speed")).never().toBeNil()
 		expect(state.score > 0).toBeTruthy()
 	end)
@@ -513,8 +630,8 @@ t.describe("sim/MovementGuard", function()
 		-- not. The asymmetry is the whole point.
 		local rising = MovementGuard.new()
 		local falling = MovementGuard.new()
-		MovementGuard.check(rising, v3(0, 0, 0), v3(0, 9, 0), DT, SPEED, P)
-		MovementGuard.check(falling, v3(0, 0, 0), v3(0, -9, 0), DT, SPEED, P)
+		sustain(rising, 0, 9, WINDOW_TICKS)
+		sustain(falling, 0, -9, WINDOW_TICKS)
 		expect(rising.score > falling.score).toBeTruthy()
 		expect(falling.score).toEqual(0)
 	end)
@@ -587,8 +704,8 @@ t.describe("sim/MovementGuard", function()
 		local fast = MovementGuard.new()
 		local distance = 10 * (1 / 20)
 
-		MovementGuard.check(slow, v3(0, 0, 0), v3(0, 0, distance), DT, 5, P)
-		MovementGuard.check(fast, v3(0, 0, 0), v3(0, 0, distance), DT, 20, P)
+		sustain(slow, distance, 0, WINDOW_TICKS, 5)
+		sustain(fast, distance, 0, WINDOW_TICKS, 20)
 
 		expect(slow.score > 0).toBeTruthy()
 		expect(fast.score).toEqual(0)

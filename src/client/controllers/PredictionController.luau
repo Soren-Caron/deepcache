@@ -21,6 +21,9 @@ local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 local WeaponsConfig = require(Shared.config.Weapons)
 local Remotes = require(Shared.net.Remotes)
 local Wire = require(Shared.net.Wire)
+local Types = require(Shared.core.Types)
+local Raycast = require(Shared.core.sim.Raycast)
+local EntityRenderer = require("./EntityRenderer")
 
 local PredictionController = {}
 
@@ -33,6 +36,79 @@ type Pending = {
 
 local player = Players.LocalPlayer
 local camera = workspace.CurrentCamera
+
+--- Where a shot is aimed, and where it starts.
+---
+--- Both used to come from the camera, which is wrong in third person for two
+--- separate reasons. The camera sits about ten studs behind the character, so
+--- the drawn tracer began in mid-air behind the player; and the server rejects
+--- an origin further than `ORIGIN_TOLERANCE` (8 studs) from the character and
+--- substitutes its own, so the server was already firing from the character
+--- while the client drew from the camera. They disagreed on every shot.
+---
+--- Now: the aim point is where the *mouse* points, found by casting the
+--- camera's ray through the cursor, and the shot leaves the character's
+--- shoulder toward it. Client and server then agree, and the crosshair
+--- (which follows the cursor) tells the truth about where rounds go.
+local aimParams = RaycastParams.new()
+aimParams.FilterType = Enum.RaycastFilterType.Exclude
+aimParams.IgnoreWater = true
+
+local AIM_RANGE = 2000
+
+local function shoulderOrigin(root: BasePart): Vector3
+	return root.Position + Vector3.new(0, 1.2, 0)
+end
+
+--- World point the cursor is over. Falls back to a far point along the ray
+--- when the cursor is over open sky, so aiming at nothing still fires forward
+--- rather than refusing.
+--- Entity states a shot passes through, matching what the server refuses to
+--- register a hit against. Aiming at a corpse would otherwise pull the shot off
+--- the live enemy standing behind it.
+local AIM_SKIP_STATES: { [Types.EntityStateName]: boolean } = { death = true, spawn = true }
+
+local function aimPoint(): Vector3
+	local mouse = UserInputService:GetMouseLocation()
+	-- GetMouseLocation is in viewport space including the inset; ScreenPointToRay
+	-- expects the same, so no adjustment is needed.
+	local ray = camera:ViewportPointToRay(mouse.X, mouse.Y)
+	local exclude: { Instance } = {}
+	if player.Character then
+		table.insert(exclude, player.Character)
+	end
+	local effects = workspace:FindFirstChild("DeepcacheEffects")
+	if effects then
+		table.insert(exclude, effects)
+	end
+	aimParams.FilterDescendantsInstances = exclude
+
+	local hit = workspace:Raycast(ray.Origin, ray.Direction * AIM_RANGE, aimParams)
+	local geometryDistance = if hit then hit.Distance else AIM_RANGE
+
+	-- Enemies are invisible to the engine's raycaster: their rig parts are
+	-- `CanQuery = false`, so the cast above sails through them onto the floor
+	-- behind. Firing from the shoulder at that far point misses, because the
+	-- camera is roughly ten studs behind the shoulder and the parallax between
+	-- the two grows with distance to the aim point. So test the entity spheres
+	-- explicitly, with the same pure math the server will use to judge the
+	-- shot -- one implementation, so client and server cannot disagree about
+	-- what the cursor was over.
+	local views, radii = EntityRenderer.aimTargets()
+	local entityHit = Raycast.nearestEntity(
+		Wire.toVec3(ray.Origin),
+		Wire.toVec3(ray.Direction.Unit),
+		views,
+		radii,
+		geometryDistance,
+		AIM_SKIP_STATES
+	)
+	if entityHit ~= nil then
+		return Vector3.new(entityHit.point.x, entityHit.point.y, entityHit.point.z)
+	end
+
+	return if hit then hit.Position else ray.Origin + ray.Direction * AIM_RANGE
+end
 
 local pending: { [number]: Pending } = {}
 local nextSeq = 1
@@ -56,6 +132,22 @@ local hooks = {
 	onHitmarker = function(_confirmed: boolean) end,
 	onRemoveHitmarker = function() end,
 	onAmmoChanged = function(_weaponId: string, _ammo: number) end,
+	onWeaponChanged = function(_weaponId: string, _ammo: number) end,
+	onReloadStateChanged = function(_weaponId: string, _reloading: boolean, _seconds: number) end,
+}
+
+--- Set while the server has a reload in flight for the held weapon. Firing is
+--- refused server-side during it anyway; tracking it here stops the client
+--- sending requests it knows will be rejected, and stops the auto-reload below
+--- firing a second request every frame.
+local reloading: { [string]: boolean } = {}
+
+--- Number-key bindings, in the order docs/01 lists the weapon table.
+local SLOT_KEYS: { [Enum.KeyCode]: string } = {
+	[Enum.KeyCode.One] = "Sidearm",
+	[Enum.KeyCode.Two] = "Carbine",
+	[Enum.KeyCode.Three] = "Slug",
+	[Enum.KeyCode.Four] = "Arc",
 }
 
 function PredictionController.setHooks(newHooks: { [string]: any })
@@ -71,6 +163,22 @@ function PredictionController.setWeapon(weaponId: string)
 		return
 	end
 	currentWeapon = weaponId
+end
+
+--- Ask the server to reload the held weapon. The server owns the timer and the
+--- magazine; this only sends the request and lets `ReloadState` come back.
+function PredictionController.requestReload()
+	local weapon = (WeaponsConfig :: any)[currentWeapon]
+	if weapon == nil or weapon.magazine == nil then
+		return
+	end
+	if reloading[currentWeapon] then
+		return
+	end
+	if (ammo[currentWeapon] or 0) >= weapon.magazine then
+		return
+	end
+	Remotes.event("ReloadRequest"):FireServer(currentWeapon)
 end
 
 local function percentile(values: { number }, fraction: number): number
@@ -116,18 +224,31 @@ local function fire()
 		return
 	end
 
+	if reloading[currentWeapon] then
+		return
+	end
+
 	local remaining = ammo[currentWeapon]
 	if remaining == nil then
 		remaining = weapon.magazine
 	end
 	if remaining <= 0 then
+		-- Auto-reload on empty. Without it the weapon simply stops working and
+		-- nothing on screen explains why -- which is exactly how it behaved
+		-- before reloading existed at all.
+		PredictionController.requestReload()
 		return
 	end
 
 	lastFireAt = now
 
-	local origin = camera.CFrame.Position
-	local direction = camera.CFrame.LookVector
+	local origin = shoulderOrigin(root)
+	local target = aimPoint()
+	local toTarget = target - origin
+	if toTarget.Magnitude < 1e-3 then
+		return
+	end
+	local direction = toTarget.Unit
 
 	-- Predict presentation immediately. This is what makes the shot feel
 	-- instant regardless of latency.
@@ -219,9 +340,24 @@ function PredictionController.start()
 	for name, weapon in WeaponsConfig :: any do
 		ammo[name] = weapon.magazine
 	end
+	-- Push the starting weapon once. Seeding `ammo` locally is not enough: the
+	-- HUD only ever learns a count from a hook, so without this it reads
+	-- "Sidearm 0" from boot until the player fires their first shot.
+	hooks.onWeaponChanged(currentWeapon, ammo[currentWeapon] or 0)
 
 	Remotes.event("FireResult").OnClientEvent:Connect(onFireResult)
 	Remotes.event("AmmoSync").OnClientEvent:Connect(onAmmoSync)
+	Remotes.event("ReloadState").OnClientEvent:Connect(function(payload)
+		if typeof(payload) ~= "table" or typeof(payload.weaponId) ~= "string" then
+			return
+		end
+		reloading[payload.weaponId] = payload.reloading == true
+		hooks.onReloadStateChanged(
+			payload.weaponId,
+			payload.reloading == true,
+			tonumber(payload.seconds) or 0
+		)
+	end)
 
 	UserInputService.InputBegan:Connect(function(input, processed)
 		if processed then
@@ -229,6 +365,23 @@ function PredictionController.start()
 		end
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
 			fire()
+			return
+		end
+
+		-- Weapon switching. All four weapons have worked server-side since M2-5
+		-- and `setWeapon` has existed since M1, but nothing was ever bound to
+		-- it, so a real session could only ever fire the Sidearm. With 88 dps
+		-- that made a Warden (700 HP, 15.7 dps) and a Reclaimer (550 HP, 26
+		-- dps) unwinnable solo -- they out-damage the time needed to kill them.
+		if input.KeyCode == Enum.KeyCode.R then
+			PredictionController.requestReload()
+			return
+		end
+
+		local slot = SLOT_KEYS[input.KeyCode]
+		if slot ~= nil then
+			PredictionController.setWeapon(slot)
+			hooks.onWeaponChanged(slot, ammo[slot] or 0)
 		end
 	end)
 end

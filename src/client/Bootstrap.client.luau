@@ -7,9 +7,12 @@
 	while the authoritative answer is in flight.
 ]]
 
+local Players = game:GetService("Players")
 local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 
 local Branding = require(Shared.config.Branding)
+local Remotes = require(Shared.net.Remotes)
+local Effects = require("./controllers/Effects")
 local EntityRenderer = require("./controllers/EntityRenderer")
 local PredictionController = require("./controllers/PredictionController")
 local HudController = require("./controllers/HudController")
@@ -17,6 +20,10 @@ local CorrectionController = require("./controllers/CorrectionController")
 local MarketController = require("./controllers/MarketController")
 local LookController = require("./controllers/LookController")
 local RagdollController = require("./controllers/RagdollController")
+local SprintController = require("./controllers/SprintController")
+local AudioController = require("./controllers/AudioController")
+local MeleeController = require("./controllers/MeleeController")
+local RepairController = require("./controllers/RepairController")
 
 local function main()
 	EntityRenderer.start()
@@ -27,29 +34,141 @@ local function main()
 	CorrectionController.start()
 	MarketController.start()
 	RagdollController.start()
+	-- Before anything that can emit a cue, so the counters exist from boot and
+	-- an absent folder means "never started" rather than "nothing played yet".
+	AudioController.start()
+	SprintController.setHooks({ onStaminaChanged = HudController.setStamina })
+	SprintController.start()
+
+	-- The sweep. Its arc is drawn from the numbers the server sends rather than
+	-- from the local config, so the visual can never disagree with the hitbox
+	-- that was actually used.
+	MeleeController.setHooks({
+		onCooldownChanged = HudController.setMeleeCooldown,
+		onHit = function(_count: number)
+			HudController.showHitmarker()
+			AudioController.play("hitConfirm")
+		end,
+	})
+	MeleeController.setSwingRenderer(function(payload)
+		if typeof(payload.from) ~= "Vector3" then
+			return
+		end
+		Effects.meleeSweep(payload.from, payload.facing or 0, payload.radius or 12, payload.arcDegrees or 120)
+		AudioController.play("meleeSwing", payload.from)
+	end)
+	MeleeController.start()
+
+	RepairController.setHooks({
+		onChanged = HudController.setRepair,
+		-- Why a repair was refused or dropped. Without this the player presses
+		-- [G], nothing happens, and there is nothing on screen to learn from.
+		onNotice = function(text: string)
+			HudController.showBanner(text, true)
+		end,
+	})
+	RepairController.start()
+
+	-- Which weapon is live, mirrored here so the fire cue can be per-weapon.
+	-- Four weapons that sound identical read as one weapon.
+	local currentWeapon = "Sidearm"
 
 	PredictionController.setHooks({
 		onTracer = function(origin: Vector3, target: Vector3)
-			-- M1 placeholder. The effects layer lands in M7; drawing a beam
-			-- here keeps the prediction path observable in a playtest.
-			local distance = (target - origin).Magnitude
-			local beam = Instance.new("Part")
-			beam.Anchored = true
-			beam.CanCollide = false
-			beam.CanQuery = false
-			beam.CastShadow = false
-			beam.Material = Enum.Material.Neon
-			beam.Color = Color3.fromRGB(255, 220, 150)
-			beam.Size = Vector3.new(0.1, 0.1, distance)
-			beam.CFrame = CFrame.lookAt(origin, target) * CFrame.new(0, 0, -distance / 2)
-			beam.Parent = workspace
-			task.delay(0.05, function()
-				beam:Destroy()
-			end)
+			Effects.tracer(origin, target)
+			Effects.muzzleFlash(origin)
+			AudioController.play(`weaponFire{currentWeapon}`)
+		end,
+		-- `onHitmarker` and `onRemoveHitmarker` were declared in M1 and never
+		-- wired to anything, so a landed shot produced no feedback at all.
+		onHitmarker = function(_confirmed: boolean)
+			HudController.showHitmarker()
+			AudioController.play("hitConfirm")
+		end,
+		-- The HUD is the only feedback that a weapon switch took effect.
+		onAmmoChanged = function(weaponId: string, ammo: number)
+			HudController.setAmmo(weaponId, ammo)
+			if ammo == 0 and weaponId == currentWeapon then
+				AudioController.play("weaponDryFire")
+			end
+		end,
+		onWeaponChanged = function(weaponId: string, ammo: number)
+			currentWeapon = weaponId
+			HudController.setWeapon(weaponId, ammo)
+		end,
+		onReloadStateChanged = function(weaponId: string, reloading: boolean, seconds: number)
+			HudController.setReloading(weaponId, reloading, seconds)
+			AudioController.play(if reloading then "weaponReloadStart" else "weaponReloadDone")
 		end,
 	})
 
+	-- Ranged enemies: draw the shot. Server-side the damage has already
+	-- landed; this is the only thing that tells a player where it came from.
+	local ENEMY_BOLT_COLOUR: { [string]: Color3 } = {
+		Sentry = Color3.fromRGB(120, 180, 255),
+		Lancer = Color3.fromRGB(150, 255, 170),
+	}
+	Remotes.event("EnemyShot").OnClientEvent:Connect(function(payload)
+		if typeof(payload) ~= "table" or typeof(payload.from) ~= "Vector3" or typeof(payload.to) ~= "Vector3" then
+			return
+		end
+		Effects.enemyBolt(payload.from, payload.to, ENEMY_BOLT_COLOUR[payload.kind])
+		-- Positional: this cue's whole job is telling the player where the
+		-- shooter is, so playing it flat would throw that away.
+		AudioController.play("enemyShot", payload.from)
+	end)
+
+	-- Taking a hit. The HUD arrow points at it; this makes it land without
+	-- being read.
+	Remotes.event("DamageFrom").OnClientEvent:Connect(function(payload)
+		if typeof(payload) ~= "table" then
+			return
+		end
+		AudioController.play("hitTaken")
+	end)
+
+	Remotes.event("Ragdoll").OnClientEvent:Connect(function(payload)
+		if typeof(payload) ~= "table" or typeof(payload.deathPos) ~= "Vector3" then
+			return
+		end
+		AudioController.play("enemyDeath", payload.deathPos)
+	end)
+
+	Remotes.event("RunEvent").OnClientEvent:Connect(function(payload)
+		if typeof(payload) ~= "table" then
+			return
+		end
+		if payload.kind == "padOpened" then
+			AudioController.play("padOpen")
+		elseif payload.kind == "runEnded" then
+			AudioController.play("runEnd")
+		end
+	end)
+
+	-- CarryUpdate fires on pickups, drops, *and* the refresh a run restart
+	-- sends. Only a genuine increase is a pickup, so track the count rather
+	-- than playing on every update and lying twice out of three times.
+	local carriedCount = 0
+	Remotes.event("CarryUpdate").OnClientEvent:Connect(function(payload)
+		if typeof(payload) ~= "table" then
+			return
+		end
+		local count = if typeof(payload.items) == "table" then #payload.items else 0
+		if count > carriedCount then
+			AudioController.play("lootPickup")
+		end
+		carriedCount = count
+	end)
+
 	PredictionController.start()
+
+	-- The `systems` gate for the loading screen in ReplicatedFirst. An
+	-- attribute rather than a remote or a BindableEvent because ReplicatedFirst
+	-- runs before ReplicatedStorage has necessarily filled in, and a player
+	-- attribute is readable the moment either side sets it, with no ordering
+	-- question and nothing to clean up. If this never fires the screen releases
+	-- on its timeout and warns, rather than trapping the player.
+	Players.LocalPlayer:SetAttribute("dcClientReady", true)
 
 	print(`[{Branding.gameName}] client up — entities, prediction, HUD, corrections, market, look, ragdolls`)
 end

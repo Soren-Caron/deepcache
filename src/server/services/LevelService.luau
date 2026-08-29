@@ -26,7 +26,9 @@ local Workspace = game:GetService("Workspace")
 local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 
 local Assemble = require(Shared.core.level.Assemble)
+local Decor = require(Shared.core.level.Decor)
 local Path = require(Shared.core.level.Path)
+local DecorConfig = require(Shared.config.Decor)
 local Rooms = require(Shared.config.Rooms)
 local Zones = require(Shared.config.Zones)
 local Types = require(Shared.core.Types)
@@ -44,14 +46,25 @@ local function toVector3(v: Types.Vec3): Vector3
 	return Vector3.new(v.x, v.y, v.z)
 end
 
---- Placeholder tint: deeper zones read darker. Replaced wholesale at M7-5.
-local function zoneColor(zone: string): Color3
-	local depth = Zones[zone].depth
-	local shade = 0.62 - (depth - 1) * 0.14
-	return Color3.new(shade, shade, shade + 0.03)
+local function rgb(entry: any): Color3
+	return Color3.fromRGB(entry.r, entry.g, entry.b)
 end
 
-local function makePart(name: string, size: Vector3, position: Vector3, parent: Instance, color: Color3): Part
+--- Surface palette for a zone. Floors, walls and trim differ per zone so the
+--- three bands of the run read apart on geometry alone, before the lighting
+--- stack is applied over the top.
+local function palette(zone: string): any
+	return (Zones :: any)[zone].palette
+end
+
+local function makePart(
+	name: string,
+	size: Vector3,
+	position: Vector3,
+	parent: Instance,
+	color: Color3,
+	material: Enum.Material?
+): Part
 	local part = Instance.new("Part")
 	part.Name = name
 	part.Size = size
@@ -60,7 +73,62 @@ local function makePart(name: string, size: Vector3, position: Vector3, parent: 
 	part.CanCollide = true
 	part.TopSurface = Enum.SurfaceType.Smooth
 	part.BottomSurface = Enum.SurfaceType.Smooth
-	part.Material = Enum.Material.Concrete
+	part.Material = material or Enum.Material.Concrete
+	part.Color = color
+	part.Parent = parent
+	return part
+end
+
+--- A thin emissive strip along the base of a wall.
+---
+--- Cheap in parts and disproportionately effective: the Vault's fog ends at 45
+--- studs and eats surface colour well before that, but a Neon strip still
+--- reads, so trim is what actually tells a player which zone they are standing
+--- in once visibility drops.
+local function makeTrim(name: string, size: Vector3, position: Vector3, parent: Instance, color: Color3): Part
+	local part = Instance.new("Part")
+	part.Name = name
+	part.Size = size
+	part.Position = position
+	part.Anchored = true
+	-- Decoration only: collision would let a player stand on the strip, and
+	-- query would put it in front of every wall raycast in the combat path.
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.CastShadow = false
+	part.Material = Enum.Material.Neon
+	part.Color = color
+	part.Parent = parent
+	return part
+end
+
+--- Decoration: solid enough to stop a player, invisible to every raycast.
+---
+--- `CanCollide = true` because set dressing you walk through reads as a bug
+--- rather than as sparseness. `CanQuery = false` because the alternative is a
+--- combat change: props would become cover, which moves damage numbers and
+--- invalidates the difficulty pass. That is a design decision, not a set
+--- dressing one -- see config/Decor for the full argument.
+local function makeProp(
+	name: string,
+	size: Vector3,
+	cf: CFrame,
+	parent: Instance,
+	color: Color3,
+	material: Enum.Material
+): Part
+	local part = Instance.new("Part")
+	part.Name = name
+	part.Size = size
+	part.CFrame = cf
+	part.Anchored = true
+	part.CanCollide = true
+	part.CanQuery = false
+	part.CanTouch = false
+	part.TopSurface = Enum.SurfaceType.Smooth
+	part.BottomSurface = Enum.SurfaceType.Smooth
+	part.Material = material
 	part.Color = color
 	part.Parent = parent
 	return part
@@ -69,12 +137,17 @@ end
 --- One wall face. Splits around a doorway when the face carries a used
 --- connector, and adds the lintel above it so the gap is a doorway rather than
 --- a slot open to the ceiling.
+local TRIM_HEIGHT = 0.4
+
 local function buildWall(
 	parent: Instance,
 	face: string,
 	module_: Assemble.PlacedModule,
 	doorWidth: number?,
-	color: Color3
+	color: Color3,
+	wallMaterial: Enum.Material,
+	trimColor: Color3,
+	accentColor: Color3
 )
 	local thickness = GEOMETRY.wallThickness
 	local height = GEOMETRY.wallHeight
@@ -104,7 +177,53 @@ local function buildWall(
 		local position = if horizontal
 			then Vector3.new(x + offset, yCentre, z)
 			else Vector3.new(x, yCentre, z + offset)
-		makePart(`Wall_{face}_{name}`, size, position, parent, color)
+		makePart(`Wall_{face}_{name}`, size, position, parent, color, wallMaterial)
+	end
+
+	-- One continuous strip along the base of the face, under the doorway gap
+	-- too: it reads as a floor-level light channel rather than as trim that
+	-- stops and restarts at every jamb.
+	local trimSize = if horizontal
+		then Vector3.new(span, TRIM_HEIGHT, thickness * 0.55)
+		else Vector3.new(thickness * 0.55, TRIM_HEIGHT, span)
+	makeTrim(`Trim_{face}`, trimSize, Vector3.new(x, TRIM_HEIGHT / 2 + 0.05, z), parent, trimColor)
+
+	-- Structure on the face. A 24-stud wall with a single strip at its base
+	-- reads as one flat slab from any distance; a band near the top and a few
+	-- vertical pilasters give it a scale to be read against, for a handful of
+	-- parts and no gameplay effect at all.
+	local structure = DecorConfig.structure
+	local bandY = height * structure.upperBandAt
+	local bandSize = if horizontal
+		then Vector3.new(span, structure.upperBandHeight, thickness * 0.6)
+		else Vector3.new(thickness * 0.6, structure.upperBandHeight, span)
+	local band = makeProp(
+		`Band_{face}`,
+		bandSize,
+		CFrame.new(x, bandY, z),
+		parent,
+		accentColor,
+		Enum.Material.Metal
+	)
+	band.CanCollide = false
+
+	for _, offset in Decor.pilasterOffsets(span, structure.pilasterSpacing) do
+		local pilasterSize = if horizontal
+			then Vector3.new(structure.pilasterWidth, height, structure.pilasterDepth)
+			else Vector3.new(structure.pilasterDepth, height, structure.pilasterWidth)
+		-- Pushed just proud of the wall face, toward the room interior.
+		local towardInside = if face == "N" or face == "E" then -1 else 1
+		local px = if horizontal then x + offset else x + towardInside * (thickness / 2)
+		local pz = if horizontal then z + towardInside * (thickness / 2) else z + offset
+		local pilaster = makeProp(
+			`Pilaster_{face}`,
+			pilasterSize,
+			CFrame.new(px, height / 2, pz),
+			parent,
+			accentColor,
+			Enum.Material.Concrete
+		)
+		pilaster.CanCollide = false
 	end
 
 	if doorWidth == nil then
@@ -119,6 +238,154 @@ local function buildWall(
 
 	local lintelHeight = height - GEOMETRY.doorwayHeight
 	segment("Lintel", doorWidth, 0, GEOMETRY.doorwayHeight + lintelHeight / 2, lintelHeight)
+end
+
+--- A lid on the room, plus the fixtures that make it survivable.
+---
+--- Sealing the rooms is what turns the level from a dollhouse of open pens
+--- into an interior -- but it also removes the sky, which was doing all the
+--- lighting. Every ceiling therefore comes with fixtures; a sealed room with
+--- no light source is a black box, which is why `Decor.ceilingLights` is
+--- specified to always return at least one.
+---
+--- The ceiling itself is queryable, unlike the rest of the decoration: it is
+--- real geometry, and a shot fired at the ceiling should stop there.
+local function buildCeiling(model: Model, module_: Assemble.PlacedModule, pal: any)
+	local geometry = DecorConfig.ceiling
+	local height = GEOMETRY.wallHeight
+
+	makePart(
+		"Ceiling",
+		Vector3.new(module_.width, geometry.thickness, module_.depth),
+		Vector3.new(module_.at.x, height + geometry.thickness / 2, module_.at.z),
+		model,
+		rgb(pal.ceiling),
+		Enum.Material[pal.ceilingMaterial] :: Enum.Material
+	)
+
+	local fixtureColor = rgb(pal.fixture)
+	local room: Decor.Room = {
+		x = module_.at.x,
+		z = module_.at.z,
+		width = module_.width,
+		depth = module_.depth,
+		doorFaces = {},
+	}
+
+	for index, at in Decor.ceilingLights(room, DecorConfig.placement :: any) do
+		-- The emissive panel carries most of the read; the PointLight does the
+		-- rest. Shadows are off -- a shadow-casting light per fixture is the
+		-- fastest way to lose the frame budget, and these are flush ceiling
+		-- panels with nothing above them to cast anything interesting.
+		local panel = makeTrim(
+			`Fixture_{index}`,
+			Vector3.new(geometry.fixtureWidth, geometry.fixtureThickness, geometry.fixtureDepth),
+			Vector3.new(at.x, height - geometry.fixtureThickness, at.z),
+			model,
+			fixtureColor
+		)
+
+		local light = Instance.new("PointLight")
+		light.Color = fixtureColor
+		light.Range = geometry.lightRange
+		-- Per zone, because how much light a room needs is a property of what
+		-- its surfaces are made of. One global brightness cannot serve both: at
+		-- a value that lit the Vault's near-black slate, the Perimeter's pale
+		-- concrete saturated to white; at a value the Perimeter looked right
+		-- at, the Vault rendered as glowing panels floating in a void. Albedo
+		-- belongs with the palette, so the multiplier does too.
+		light.Brightness = geometry.lightBrightness * (pal.fixtureBrightness or 1)
+		light.Shadows = false
+		light.Parent = panel
+	end
+end
+
+--- Set dressing against the walls. Positions come from pure core; this turns
+--- them into parts.
+--- Footprints of the props placed in the module currently being built, so
+--- spawn points can be kept out of them.
+---
+--- Entities are pure simulation with no collision against level geometry:
+--- nothing stops one occupying the same space as a crate, and a Sentry has
+--- speed 0, so one that spawns inside a prop stays inside it forever. Reported
+--- from play as ranged enemies spawning in prop blocks.
+local propFootprints: { { x: number, z: number, radius: number } } = {}
+
+local function buildProps(
+	model: Model,
+	module_: Assemble.PlacedModule,
+	pal: any,
+	seed: number,
+	widths: { [string]: number }
+)
+	local doorFaces: { string } = {}
+	for face in widths do
+		table.insert(doorFaces, face)
+	end
+	-- Sorted so the room's props do not depend on `pairs` ordering, which would
+	-- make a "deterministic" level differ between runs of the same seed.
+	table.sort(doorFaces)
+
+	local room: Decor.Room = {
+		x = module_.at.x,
+		z = module_.at.z,
+		width = module_.width,
+		depth = module_.depth,
+		doorFaces = doorFaces,
+	}
+
+	local kinds = (DecorConfig.kindsByZone :: any)[module_.zone] or {}
+	-- Per-module seed: the level seed alone would give every room the same
+	-- arrangement, and the module index alone would make two different levels
+	-- identical room-for-room.
+	local moduleSeed = seed * 7919 + module_.index * 104729
+	local propColor = rgb(pal.prop)
+
+	for index, placement in Decor.props(room, moduleSeed, GEOMETRY.wallThickness, DecorConfig.placement :: any, kinds) do
+		local kind = (DecorConfig.kinds :: any)[placement.kind]
+		if kind == nil then
+			continue
+		end
+		local size = Vector3.new(kind.size.x, kind.size.y, kind.size.z) * placement.scale
+		-- Radius that covers the box's diagonal in the ground plane, so a spawn
+		-- point cleared against it is clear of the whole footprint however the
+		-- prop is rotated.
+		table.insert(propFootprints, {
+			x = placement.x,
+			z = placement.z,
+			radius = math.sqrt(size.X * size.X + size.Z * size.Z) / 2,
+		})
+
+		makeProp(
+			`Prop_{index}_{placement.kind}`,
+			size,
+			CFrame.new(placement.x, size.Y / 2, placement.z) * CFrame.Angles(0, placement.yaw, 0),
+			model,
+			-- Negative `lighten` darkens. Lerping toward white with a negative
+			-- alpha extrapolates instead, which puts components outside 0..1 and
+			-- clips to a colour nobody authored.
+			(if kind.lighten >= 0
+				then propColor:Lerp(Color3.new(1, 1, 1), kind.lighten)
+				else propColor:Lerp(Color3.new(0, 0, 0), -kind.lighten)),
+			Enum.Material[kind.material] :: Enum.Material
+		)
+	end
+end
+
+--- Largest hitbox any kind has, so one clearance figure serves them all.
+--- Cheaper than filtering per kind, and erring wide only costs a spawn point in
+--- a room that has plenty.
+local LARGEST_HITBOX = 4.0
+
+--- Is `(x, z)` far enough from every prop in this module to spawn something?
+local function clearOfProps(x: number, z: number): boolean
+	for _, prop in propFootprints do
+		local dx, dz = x - prop.x, z - prop.z
+		if math.sqrt(dx * dx + dz * dz) < prop.radius + LARGEST_HITBOX then
+			return false
+		end
+	end
+	return true
 end
 
 --- Points inside a module, inset from the walls, for enemy and loot spawning.
@@ -143,11 +410,11 @@ local function spawnPointsIn(module_: Assemble.PlacedModule): { Types.Vec3 }
 		for column = 1, columns do
 			local fx = if columns == 1 then 0.5 else (column - 1) / (columns - 1)
 			local fz = if rows == 1 then 0.5 else (row - 1) / (rows - 1)
-			table.insert(out, {
-				x = module_.at.x - usableW / 2 + fx * usableW,
-				y = 0,
-				z = module_.at.z - usableD / 2 + fz * usableD,
-			})
+			local px = module_.at.x - usableW / 2 + fx * usableW
+			local pz = module_.at.z - usableD / 2 + fz * usableD
+			if clearOfProps(px, pz) then
+				table.insert(out, { x = px, y = 0, z = pz })
+			end
 		end
 	end
 	return out
@@ -234,7 +501,12 @@ function LevelService.build(seed: number): Assemble.Layout
 	spawnPoints = { Perimeter = {}, Processing = {}, Vault = {} }
 
 	for _, module_ in layout.modules do
-		local color = zoneColor(module_.zone)
+		local pal = palette(module_.zone)
+		local floorColor = rgb(pal.floor)
+		local wallColor = rgb(pal.wall)
+		local trimColor = rgb(pal.trim)
+		local floorMaterial = Enum.Material[pal.floorMaterial] :: Enum.Material
+		local wallMaterial = Enum.Material[pal.wallMaterial] :: Enum.Material
 		local model = Instance.new("Model")
 		model.Name = string.format("%03d_%s", module_.index, module_.id)
 		model:SetAttribute("moduleIndex", module_.index)
@@ -249,14 +521,22 @@ function LevelService.build(seed: number): Assemble.Layout
 			Vector3.new(module_.width, GEOMETRY.floorThickness, module_.depth),
 			Vector3.new(module_.at.x, -GEOMETRY.floorThickness / 2, module_.at.z),
 			model,
-			color
+			floorColor,
+			floorMaterial
 		)
 		model.PrimaryPart = floor
 
 		local widths = doorWidths(module_)
+		local accentColor = rgb(pal.prop)
 		for _, face in { "N", "S", "E", "W" } do
-			buildWall(model, face, module_, widths[face], color)
+			buildWall(model, face, module_, widths[face], wallColor, wallMaterial, trimColor, accentColor)
 		end
+
+		buildCeiling(model, module_, pal)
+		-- Per module: `clearOfProps` is only ever asked about the module whose
+		-- spawn points are being generated next.
+		table.clear(propFootprints)
+		buildProps(model, module_, pal, seed, widths)
 
 		for _, point in spawnPointsIn(module_) do
 			table.insert(spawnPoints[module_.zone], point)

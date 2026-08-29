@@ -8,14 +8,30 @@ local Types = require("../src/shared/core/Types")
 
 local TICK = 1 / 20
 
-local function view(id: number, x: number, yaw: number?, state: Types.EntityStateName?): Types.EntityView
+local function view(
+	id: number,
+	x: number,
+	yaw: number?,
+	state: Types.EntityStateName?,
+	kind: Types.EntityKind?
+): Types.EntityView
 	return {
 		id = id,
+		-- Not "Skitter": a fixture that matches the renderer's fallback makes a
+		-- dropped field indistinguishable from a carried one. That is exactly
+		-- how kind went missing here in the first place.
+		kind = kind or "Warden",
 		pos = Types.vec3(x, 0, 0),
 		yaw = yaw or 0,
 		state = state or "move",
 		hpPct = 1,
 	}
+end
+
+local function hurtView(id: number, x: number, hp: number): Types.EntityView
+	local v = view(id, x)
+	v.hpPct = hp
+	return v
 end
 
 --- Entity 1 moving +1 stud per tick, frames at t = 0, TICK, 2*TICK, ...
@@ -252,5 +268,75 @@ t.describe("net/Interpolator adaptive delay", function()
 			Interpolator.observeArrival(interp, i * TICK)
 		end
 		expect(#interp.arrivals <= Interpolator.JITTER_SAMPLES).toBeTruthy()
+	end)
+end)
+
+t.describe("net/Interpolator carries hpPct", function()
+	-- Same class of bug as `kind`, found the same way: the renderer's hit
+	-- flash did `sample.hpPct - epsilon` and threw every frame because the
+	-- Sample never carried health. The render loop died partway through, so
+	-- some entities silently stopped being drawn at all.
+	t.it("carries hpPct when interpolating", function()
+		local interp = Interpolator.new()
+		Interpolator.push(interp, 0, { hurtView(1, 0, 0.8) })
+		Interpolator.push(interp, TICK, { hurtView(1, 1, 0.8) })
+		local sample = Interpolator.sample(interp, 1, 0.5 * TICK)
+		expect((sample :: any).hpPct).approx(0.8, 1e-9)
+	end)
+
+	t.it("carries hpPct when extrapolating", function()
+		local interp = Interpolator.new()
+		Interpolator.push(interp, 0, { hurtView(1, 0, 0.3) })
+		Interpolator.push(interp, TICK, { hurtView(1, 1, 0.3) })
+		local sample = Interpolator.sample(interp, 1, TICK + 0.04)
+		expect((sample :: any).extrapolated).toBeTruthy()
+		expect((sample :: any).hpPct).approx(0.3, 1e-9)
+	end)
+
+	t.it("never returns a sample with a nil hpPct", function()
+		-- The guard that would have caught this before Studio did.
+		local interp = linear(4)
+		for _, t_ in { -10, 0, 0.5 * TICK, 2 * TICK, 3 * TICK + 0.04 } do
+			local sample = Interpolator.sample(interp, 1, t_)
+			if sample ~= nil then
+				expect(type((sample :: any).hpPct)).toEqual("number")
+				expect(type((sample :: any).kind)).toEqual("string")
+			end
+		end
+	end)
+end)
+
+t.describe("net/Interpolator carries kind", function()
+	-- Found in Studio: every enemy rendered as the same grey box because the
+	-- interpolator built its own Sample and silently dropped `kind`. The
+	-- snapshot round-trip tests all passed -- they never went through here.
+	t.it("keeps kind when interpolating between two frames", function()
+		local interp = linear(4)
+		local sample = Interpolator.sample(interp, 1, 1.5 * TICK)
+		expect(sample).never().toBeNil()
+		expect((sample :: any).kind).toEqual("Warden")
+	end)
+
+	t.it("keeps kind when extrapolating past the newest frame", function()
+		local interp = linear(3)
+		local sample = Interpolator.sample(interp, 1, 2 * TICK + 0.04)
+		expect(sample).never().toBeNil()
+		expect((sample :: any).extrapolated).toBeTruthy()
+		expect((sample :: any).kind).toEqual("Warden")
+	end)
+
+	t.it("keeps kind when clamping behind the oldest frame", function()
+		local interp = linear(3)
+		local sample = Interpolator.sample(interp, 1, -10)
+		expect(sample).never().toBeNil()
+		expect((sample :: any).kind).toEqual("Warden")
+	end)
+
+	t.it("reports the kind the entity actually is, not the first one seen", function()
+		local interp = Interpolator.new()
+		Interpolator.push(interp, 0, { view(1, 0, 0, "move", "Hauler"), view(2, 0, 0, "move", "Lancer") })
+		Interpolator.push(interp, TICK, { view(1, 1, 0, "move", "Hauler"), view(2, 1, 0, "move", "Lancer") })
+		expect((Interpolator.sample(interp, 1, 0.5 * TICK) :: any).kind).toEqual("Hauler")
+		expect((Interpolator.sample(interp, 2, 0.5 * TICK) :: any).kind).toEqual("Lancer")
 	end)
 end)

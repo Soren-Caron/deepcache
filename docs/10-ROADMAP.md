@@ -113,7 +113,7 @@ The hardest milestone, done first, on purpose.
 
 ## M7 — Presentation, polish, and the writeup (9%)
 
-**Build:** Procedural locomotion + IK for all legged entities. Ragdoll pooling. Zone lighting presets + threat-tier modulation. Inverted-hull outlines. `EditableImage` ramps within the 8-instance budget. Audio pass. Full 24 room modules. **Postmortem document. Demo video. Dashboard cleanup.**
+**Build:** Procedural locomotion + IK for all legged entities. Ragdoll pooling. Zone lighting presets + threat-tier modulation. Inverted-hull outlines. `EditableImage` ramps within the 8-instance budget. Audio pass. Full 24 room modules. Boot loading screen. **Postmortem document. Demo video. Dashboard cleanup.**
 
 **Exit:**
 - Client frame budget met at 40 entities (profiled, numbers recorded).

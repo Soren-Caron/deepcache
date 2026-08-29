@@ -143,6 +143,7 @@ end
 function EntityState.toView(entity: Types.Entity): Types.EntityView
 	return {
 		id = entity.id,
+		kind = entity.kind,
 		pos = { x = entity.pos.x, y = entity.pos.y, z = entity.pos.z },
 		yaw = entity.yaw,
 		state = entity.state,

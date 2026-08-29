@@ -21,9 +21,10 @@ local Interpolator = require(Shared.core.net.Interpolator)
 local Snapshot = require(Shared.core.net.Snapshot)
 local Types = require(Shared.core.Types)
 local Remotes = require(Shared.net.Remotes)
+local EnemiesConfig = require(Shared.config.Enemies)
 local Lod = require(Shared.core.anim.Lod)
-local StepPlanner = require(Shared.core.anim.StepPlanner)
-local TwoBoneIk = require(Shared.core.anim.TwoBoneIk)
+local RigsConfig = require(Shared.config.Rigs)
+local EntityRig = require("./EntityRig")
 
 local EntityRenderer = {}
 
@@ -35,6 +36,33 @@ local COLORS: { [string]: Color3 } = {
 	Warden = Color3.fromRGB(190, 120, 210),
 	Reclaimer = Color3.fromRGB(230, 60, 60),
 }
+
+--- Material carries the fiction: the swarm is soft, the turret is metal, the
+--- Warden is armoured.
+local KIND_MATERIAL: { [string]: Enum.Material } = {
+	Skitter = Enum.Material.SmoothPlastic,
+	Sentry = Enum.Material.DiamondPlate,
+	Hauler = Enum.Material.Metal,
+	Lancer = Enum.Material.Foil,
+	Warden = Enum.Material.Slate,
+	Reclaimer = Enum.Material.CorrodedMetal,
+}
+
+--- How far the server raises an entity's position above the floor. Mirrors
+--- `WaveService.grounded`, which lifts a spawn point by the kind's hitbox
+--- radius so the hit-detection sphere rests tangent to the ground.
+local HITBOX_LIFT: { [string]: number } = {}
+for kind, config in EnemiesConfig :: any do
+	HITBOX_LIFT[kind] = config.hitboxRadius
+end
+
+local HIT_FLASH_SECONDS = 0.08
+local HIT_FLASH_COLOR = Color3.fromRGB(255, 250, 235)
+local WOUNDED_COLOR = Color3.fromRGB(70, 20, 18)
+local DEATH_FADE_SECONDS = 0.9
+
+type Visual = { lastHp: number, flashUntil: number, deathAt: number }
+local visuals: { [number]: Visual } = {}
 
 local interp = Interpolator.new()
 local origin: Types.Vec3 = { x = 0, y = 0, z = 0 }
@@ -52,9 +80,31 @@ local origin: Types.Vec3 = { x = 0, y = 0, z = 0 }
 local baseline: { Types.EntityView } = {}
 
 local folder: Folder? = nil
-local active: { [number]: BasePart } = {}
-local pool: { BasePart } = {}
+local active: { [number]: EntityRig.Rig } = {}
 local connection: RBXScriptConnection? = nil
+
+--- Entity hitboxes as of the last rendered frame, published for the aim ray.
+---
+--- Rig parts are `CanQuery = false` (see EntityRig's header for why), so a
+--- Roblox raycast through the cursor passes straight through every enemy and
+--- lands on the floor behind them. Aiming from the shoulder at *that* point
+--- then walks the shot past the target, because the camera sits about ten
+--- studs behind the shoulder and the parallax grows with range -- measured as
+--- four consecutive misses on a Warden eight studs wide, aimed dead centre,
+--- while the server's trace reported the ray stopping on the floor thirty
+--- studs away.
+---
+--- Publishing the interpolated positions lets the aim ray test the same
+--- spheres the server will, using the same pure `core/sim/Raycast`. Rendered
+--- positions, not `baseline`: the player aims at what they can see.
+local aimViews: { Types.EntityView } = {}
+local aimRadii: { [number]: number } = {}
+
+--- Hitboxes to aim at, and their radii by id. Both are rebuilt each frame and
+--- must be treated as read-only by callers.
+function EntityRenderer.aimTargets(): ({ Types.EntityView }, { [number]: number })
+	return aimViews, aimRadii
+end
 
 local stats = {
 	snapshotsReceived = 0,
@@ -69,34 +119,21 @@ local stats = {
 -- M7-3: procedural locomotion, LOD'd, with a hard per-frame raycast budget.
 --------------------------------------------------------------------------------
 
---- Rest offsets for a generic quadruped, in entity-local space. Real per-kind
---- rigs are M7-6/M7-8 asset work; the gait itself does not care how many legs
---- there are, so one profile drives every kind for now.
-local LEG_OFFSETS = {
-	Types.vec3(1.1, 0, 1.1),
-	Types.vec3(-1.1, 0, 1.1),
-	Types.vec3(1.1, 0, -1.1),
-	Types.vec3(-1.1, 0, -1.1),
-}
---- Diagonal pairs: the standard trot. Opposing legs never lift together.
-local LEG_GROUPS = { 1, 2, 2, 1 }
-local UPPER_LENGTH, LOWER_LENGTH = 1.4, 1.6
-local POLE = Types.vec3(0, 1, 0)
+--- Per-entity render scale, set during interpolation (death collapse, spawn
+--- materialise) and consumed by the animation pass a few lines later.
+local animScale: { [number]: number } = {}
 
 type Locomotion = {
-	gait: StepPlanner.GaitState,
-	lastPos: Types.Vec3,
-	--- Last ground height this entity resolved, reused on frames where the
-	--- raycast budget did not reach it. docs/08: invisible at those distances.
-	groundY: number,
+	lastPos: Vector3,
+	phase: number,
+	--- Low-passed speed. Raw per-frame speed jitters with interpolation, and
+	--- feeding that straight into the stride amplitude makes the swing pulse,
+	--- which reads as the body pumping rather than walking.
+	smoothSpeed: number,
 }
 
 local locomotion: { [number]: Locomotion } = {}
 local frameIndex = 0
-
-local raycastParams = RaycastParams.new()
-raycastParams.FilterType = Enum.RaycastFilterType.Exclude
-raycastParams.IgnoreWater = true
 
 --- Per-frame profiling, surfaced through getStats() and sampled into
 --- perf.tick telemetry so the client numbers land beside the server ones.
@@ -111,26 +148,6 @@ local profile = {
 	tiers = { full = 0, reduced = 0, clip = 0, culled = 0 },
 }
 
-local function groundAtFactory(entityId: number, mayCast: boolean): (Types.Vec3) -> Types.Vec3
-	return function(desired: Types.Vec3): Types.Vec3
-		local loco = locomotion[entityId]
-		if not mayCast or profile.raycastsThisFrame >= Lod.RAYCAST_BUDGET then
-			-- Budget exhausted or this entity was not granted one: reuse the
-			-- last known plane rather than skipping the step entirely, which
-			-- would freeze the gait instead of merely dating it.
-			return Types.vec3(desired.x, if loco then loco.groundY else desired.y, desired.z)
-		end
-		profile.raycastsThisFrame += 1
-		local origin = Vector3.new(desired.x, desired.y + 6, desired.z)
-		local result = workspace:Raycast(origin, Vector3.new(0, -24, 0), raycastParams)
-		local y = if result then result.Position.Y else (if loco then loco.groundY else desired.y)
-		if loco then
-			loco.groundY = y
-		end
-		return Types.vec3(desired.x, y, desired.z)
-	end
-end
-
 local function container(): Folder
 	if folder then
 		return folder
@@ -142,34 +159,18 @@ local function container(): Folder
 	return created
 end
 
-local function acquire(): BasePart
-	local recycled = table.remove(pool)
-	if recycled then
-		recycled.Parent = container()
-		return recycled
-	end
-
-	local part = Instance.new("Part")
-	part.Anchored = true
-	part.CanCollide = false
-	part.CanQuery = false
-	part.CanTouch = false
-	part.CastShadow = false
-	part.TopSurface = Enum.SurfaceType.Smooth
-	part.BottomSurface = Enum.SurfaceType.Smooth
-	part.Size = Vector3.new(2, 3, 2)
-	part.Parent = container()
-	return part
-end
-
 local function release(id: number)
-	local part = active[id]
-	if part == nil then
+	local rig = active[id]
+	if rig == nil then
 		return
 	end
 	active[id] = nil
-	part.Parent = nil
-	table.insert(pool, part)
+	-- Cleared with the rig, not left behind: a stale entry would make a
+	-- recycled id inherit the previous occupant's health and flash on spawn.
+	visuals[id] = nil
+	locomotion[id] = nil
+	animScale[id] = nil
+	EntityRig.release(rig)
 end
 
 function EntityRenderer.setOrigin(newOrigin: Types.Vec3)
@@ -267,6 +268,8 @@ local function render(dt: number)
 
 	local camera = workspace.CurrentCamera
 	local eye = if camera then camera.CFrame.Position else Vector3.zero
+	local character = Players.LocalPlayer.Character
+	local localRoot = character and character:FindFirstChild("HumanoidRootPart") :: BasePart?
 
 	debug.profilebegin("deepcache/interpolate")
 	local interpStart = os.clock()
@@ -283,22 +286,69 @@ local function render(dt: number)
 			stats.extrapolatedFrames += 1
 		end
 
-		local part = active[id]
-		if part == nil then
-			part = acquire()
-			part.Name = `Entity_{id}`
-			part.Color = COLORS.Skitter
-			active[id] = part
+		local rig = active[id]
+		if rig == nil then
+			-- Kind arrives in the snapshot's spare state bits, so a Warden gets
+			-- a Warden's body plan rather than a generic box.
+			rig = EntityRig.acquire(sample.kind, container())
+			rig.model.Name = `Entity_{id}`
+			active[id] = rig
+			visuals[id] = { lastHp = sample.hpPct, flashUntil = 0, deathAt = 0 }
 			locomotion[id] = {
-				gait = StepPlanner.new(LEG_OFFSETS, LEG_GROUPS),
-				lastPos = Types.vec3(sample.pos.x, sample.pos.y, sample.pos.z),
-				groundY = sample.pos.y,
+				lastPos = Vector3.new(sample.pos.x, sample.pos.y, sample.pos.z),
+				phase = 0,
+				smoothSpeed = 0,
 			}
 		end
 
-		part.CFrame = CFrame.new(sample.pos.x, sample.pos.y, sample.pos.z)
-			* CFrame.Angles(0, sample.yaw, 0)
-		part.Transparency = if sample.state == "death" then 0.6 else 0
+		local look = visuals[id]
+		local now = os.clock()
+
+		-- Took damage since the last frame: flash. Without this there is no
+		-- feedback that a shot connected -- the enemy just silently has less
+		-- health, which reads as the weapon not working.
+		if look ~= nil and sample.hpPct < look.lastHp - 1e-4 then
+			look.flashUntil = now + HIT_FLASH_SECONDS
+		end
+		if look ~= nil then
+			look.lastHp = sample.hpPct
+		end
+
+		local scale, transparency = 1, 0
+
+
+		if sample.state == "death" then
+			-- Corpses collapse and fade over their lifetime rather than
+			-- blinking out, so a kill reads as a kill.
+			if look ~= nil and look.deathAt == 0 then
+				look.deathAt = now
+			end
+			local age = if look ~= nil then now - look.deathAt else 0
+			local t = math.clamp(age / DEATH_FADE_SECONDS, 0, 1)
+			scale = 1 - 0.55 * t
+			transparency = 0.15 + 0.75 * t
+		elseif sample.state == "spawn" then
+			-- Materialise instead of popping in.
+			scale = 0.6
+			transparency = 0.5
+		end
+
+		local colour, material
+		if look ~= nil and now < look.flashUntil then
+			colour = HIT_FLASH_COLOR
+			material = Enum.Material.Neon
+		else
+			colour = COLORS[sample.kind] or COLORS.Skitter
+			material = KIND_MATERIAL[sample.kind] or Enum.Material.SmoothPlastic
+			-- Damage tint: darken toward the low-health colour as it bleeds
+			-- out, so a nearly-dead enemy is worth pushing rather than
+			-- guessing about.
+			if sample.state ~= "death" and sample.hpPct < 0.999 then
+				colour = colour:Lerp(WOUNDED_COLOR, (1 - sample.hpPct) * 0.6)
+			end
+		end
+		animScale[id] = scale
+		EntityRig.setLook(rig, colour, material, transparency)
 
 		table.insert(candidates, {
 			id = id,
@@ -308,44 +358,72 @@ local function render(dt: number)
 	profile.interpolationMs = (os.clock() - interpStart) * 1000
 	debug.profileend()
 
-	-- Allocate the frame's raycasts before any gait runs, so the budget is a
-	-- decision made once with the whole population in view rather than a
-	-- first-come-first-served race between entities.
-	local granted = Lod.allocateRaycasts(candidates)
+	-- Republish the aim hitboxes for this frame. Rebuilt rather than mutated so
+	-- a despawned entity cannot linger as something the cursor still snaps to.
+	table.clear(aimViews)
+	table.clear(aimRadii)
+	for id, sample in samples do
+		local radius = HITBOX_LIFT[sample.kind]
+		if radius ~= nil then
+			table.insert(aimViews, {
+				id = id,
+				kind = sample.kind,
+				pos = sample.pos,
+				yaw = sample.yaw or 0,
+				state = sample.state,
+				hpPct = sample.hpPct or 1,
+			})
+			aimRadii[id] = radius
+		end
+	end
+
+	-- The R6 rig plants feet by pose rather than by ground probe, so the
+	-- 24-ray frame budget that `Lod.allocateRaycasts` exists to divide is
+	-- currently unspent. The census still drives which tiers are drawn.
 	profile.tiers = Lod.census(candidates)
 
 	debug.profilebegin("deepcache/animation")
 	local animStart = os.clock()
 	for _, candidate in candidates do
 		local id = candidate.id
-		local loco = locomotion[id]
+		local rig = active[id]
 		local sample = samples[id]
-		if loco == nil or sample == nil then
+		local loco = locomotion[id]
+		if rig == nil or sample == nil or loco == nil then
 			continue
 		end
+
 		local tier = Lod.tierFor(candidate.distance)
-		if not Lod.shouldStepGait(tier, frameIndex) then
-			continue
+		local spec = rig.spec
+		local bodyVec = Vector3.new(sample.pos.x, sample.pos.y, sample.pos.z)
+
+		-- The server's position is a hitbox centre, raised off the floor by the
+		-- kind's `hitboxRadius`. The rig poses from the *ground*, so that lift
+		-- has to come back off or every enemy stands in mid-air -- measured at
+		-- 3.02 studs of float against a floor at y=0.
+		local groundVec = bodyVec - Vector3.new(0, HITBOX_LIFT[sample.kind] or 0, 0)
+
+		-- Walk phase advances with distance travelled, not wall time, so a slow
+		-- kind takes slow strides rather than the same cycle at lower
+		-- amplitude. Standing still holds the pose instead of marching.
+		local moved = (bodyVec - loco.lastPos).Magnitude
+		loco.lastPos = bodyVec
+		loco.phase = (loco.phase + moved * spec.radiansPerStud) % (math.pi * 2)
+
+		local speed = if dt > 0 then moved / dt else 0
+		local blend = if dt > 0 then math.clamp(dt / RigsConfig.WALK.strideSmoothing, 0, 1) else 1
+		loco.smoothSpeed += (speed - loco.smoothSpeed) * blend
+		local stride = math.clamp(loco.smoothSpeed / RigsConfig.WALK.fullStrideSpeed, 0, 1)
+
+		-- The head tracks whoever it is attacking. Cheapest possible "it has
+		-- noticed you", and the strongest signal the renderer can send.
+		local lookAt: Vector3? = nil
+		if sample.state == "attack" and localRoot ~= nil then
+			lookAt = localRoot.Position
 		end
 
-		local bodyPos = Types.vec3(sample.pos.x, sample.pos.y, sample.pos.z)
-		local velocity = Types.scaleVec3(Types.subVec3(bodyPos, loco.lastPos), if dt > 0 then 1 / dt else 0)
-		loco.lastPos = bodyPos
-
-		-- Only the `full` tier is eligible for a ray at all, and even then only
-		-- if the allocator granted it one this frame.
-		local mayCast = tier == "full" and granted[id] == true
-		StepPlanner.step(loco.gait, bodyPos, velocity, dt, groundAtFactory(id, mayCast))
-
-		-- IK runs only at the full tier: at 40+ studs the joint position is
-		-- sub-pixel and solving it is pure cost.
-		if tier == "full" then
-			for _, leg in loco.gait.legs do
-				local foot = StepPlanner.footPosition(leg)
-				local hip = Types.addVec3(bodyPos, leg.restOffset)
-				TwoBoneIk.solve(hip, foot, UPPER_LENGTH, LOWER_LENGTH, POLE)
-			end
-		end
+		EntityRig.setLimbsVisible(rig, tier ~= "culled")
+		EntityRig.pose(rig, groundVec, sample.yaw, animScale[id] or 1, loco.phase, stride, lookAt)
 	end
 	profile.animationMs = (os.clock() - animStart) * 1000
 	debug.profileend()
@@ -354,7 +432,6 @@ local function render(dt: number)
 	for id in active do
 		if not seen[id] then
 			release(id)
-			locomotion[id] = nil
 		end
 	end
 
@@ -373,21 +450,6 @@ function EntityRenderer.start()
 
 	-- RenderStepped, not Heartbeat: interpolation should produce a fresh
 	-- position for the frame actually being drawn.
-	-- Ground rays must not hit the entities themselves, or every leg resolves
-	-- to the top of its own body part and the gait plants feet in mid-air.
-	-- Ragdolls are excluded for the same reason: a corpse under a walking
-	-- entity would raise its feet onto the body.
-	local excluded: { Instance } = { container() }
-	local ragdolls = workspace:FindFirstChild("DeepcacheRagdolls")
-	if ragdolls then
-		table.insert(excluded, ragdolls)
-	end
-	local character = Players.LocalPlayer.Character
-	if character then
-		table.insert(excluded, character)
-	end
-	raycastParams.FilterDescendantsInstances = excluded
-
 	connection = RunService.RenderStepped:Connect(render)
 
 	-- M7-10 needs the RUNNING renderer's profile, and require() from the
@@ -405,6 +467,24 @@ function EntityRenderer.start()
 		end
 		local info = EntityRenderer.getProfile()
 		info.stats = EntityRenderer.getStats()
+
+		-- Where entities are lost between the wire and the screen. The three
+		-- counts should agree; whichever one drops first names the layer.
+		info.baselineCount = #baseline
+		local known = Interpolator.knownIds(interp)
+		info.knownIdCount = #known
+		local sampled, renderTime = 0, workspace:GetServerTimeNow() - interp.renderDelay
+		local perId: { string } = {}
+		for _, id in known do
+			local s = Interpolator.sample(interp, id, renderTime)
+			if s ~= nil then
+				sampled += 1
+			end
+			table.insert(perId, string.format("%d:%s", id, if s ~= nil then "ok" else "NIL"))
+		end
+		info.sampledCount = sampled
+		info.perId = perId
+		info.renderDelay = interp.renderDelay
 		return info
 	end
 	bridge.Parent = Players.LocalPlayer
