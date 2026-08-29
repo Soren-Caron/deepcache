@@ -94,6 +94,12 @@ local hurtVignette: Frame
 
 local redeployButton: TextButton
 local hintLabel: TextLabel
+local summaryPanel: Frame
+local summaryTitle: TextLabel
+local summaryBody: TextLabel
+local bannerLabel: TextLabel
+local bannerUntil = 0
+local BANNER_SECONDS = 4.5
 
 --- Damage-direction indicators, newest last.
 ---
@@ -332,13 +338,21 @@ local function render()
 	-- live-looking reticle over a corpse is a small lie.
 	crosshair.Visible = not latest.complete and latest.status ~= "dead"
 
+	bannerLabel.Visible = now < bannerUntil
+	-- The summary rides with the redeploy control: both belong to the moment the
+	-- run resolves, and showing one without the other reads as half a screen.
+	summaryPanel.Visible = latest.canRedeploy == true
+
 	-- Redeploy. Offered only when the server says so, so the button cannot
 	-- appear a moment before the server would honour it.
 	redeployButton.Visible = latest.canRedeploy == true
 	if redeployButton.Visible then
-		statusLabel.Text = if latest.status == "extracted"
-			then string.format("EXTRACTED  +%d credits", latest.value)
-			else "RUN OVER"
+		-- The summary card owns the payout number now. This line used to repeat
+		-- it from `latest.value`, which is *carried* value -- already banked and
+		-- zeroed by the time the run resolves, so the screen read "+542 credits
+		-- banked" and "EXTRACTED +0 credits" at the same time. Two sources for
+		-- one number, exactly as this file's header warns.
+		statusLabel.Text = ""
 	end
 
 	-- Contextual hints. The systems that decide fights are the two nobody is
@@ -382,6 +396,32 @@ local function render()
 		0,
 		mouse.Y - hitmarker.AbsoluteSize.Y / 2
 	)
+end
+
+--- Fill the end-of-run card.
+---
+--- Extraction and death are the two ways a run ends and they deserve to read
+--- completely differently: one is the thing the whole twelve minutes was for,
+--- the other is losing everything you were carrying.
+function HudController.showSummary(extracted: boolean, zone: string?, credits: number)
+	if extracted then
+		summaryTitle.Text = "EXTRACTED"
+		summaryTitle.TextColor3 = GOOD
+		summaryBody.Text = string.format(
+			"+%d credits banked\nout via %s at %s",
+			credits,
+			tostring(zone or "a pad"),
+			formatClock(latest.elapsed)
+		)
+	else
+		summaryTitle.Text = "LOST"
+		summaryTitle.TextColor3 = ALERT
+		summaryBody.Text = string.format(
+			"%d credits left on the floor\nsurvived %s",
+			credits,
+			formatClock(latest.elapsed)
+		)
+	end
 end
 
 --- Confirmed by the server, never predicted.
@@ -680,6 +720,40 @@ function HudController.start()
 		askToRedeploy()
 	end)
 
+	-- Run summary. Extraction is the win condition and until now it produced
+	-- nothing on screen at all: the server fired `playerExtracted` with the
+	-- banked value and this handler dropped it, so succeeding was quieter than
+	-- dying. The card is the payoff moment.
+	summaryPanel = Instance.new("Frame")
+	summaryPanel.Size = UDim2.new(0, 420, 0, 132)
+	summaryPanel.Position = UDim2.new(0.5, -210, 0.5, -110)
+	summaryPanel.BackgroundColor3 = Color3.fromRGB(20, 22, 27)
+	summaryPanel.BackgroundTransparency = 0.12
+	summaryPanel.BorderSizePixel = 0
+	summaryPanel.Visible = false
+	summaryPanel.ZIndex = 7
+	summaryPanel.Parent = root
+
+	local summaryStroke = Instance.new("UIStroke")
+	summaryStroke.Color = ACCENT
+	summaryStroke.Thickness = 1
+	summaryStroke.Transparency = 0.5
+	summaryStroke.Parent = summaryPanel
+
+	summaryTitle = makeLabel(summaryPanel, UDim2.new(1, -32, 0, 40), UDim2.new(0, 16, 0, 14), 28, Enum.TextXAlignment.Center)
+	summaryTitle.ZIndex = 8
+	summaryBody = makeLabel(summaryPanel, UDim2.new(1, -32, 0, 66), UDim2.new(0, 16, 0, 56), 17, Enum.TextXAlignment.Center)
+	summaryBody.ZIndex = 8
+	summaryBody.TextWrapped = true
+
+	-- Transient banner for things that happen mid-run and matter: a pad opening
+	-- is a state change the player has been counting down to, and it was only
+	-- ever visible as the pad line quietly changing colour.
+	bannerLabel = makeLabel(root, UDim2.new(0, 620, 0, 30), UDim2.new(0.5, -310, 0, 128), 22, Enum.TextXAlignment.Center)
+	bannerLabel.TextColor3 = GOOD
+	bannerLabel.Visible = false
+	bannerLabel.ZIndex = 7
+
 	-- Hints sit under the vitals line, where the player is already looking for
 	-- ammo when they run dry.
 	hintLabel = makeLabel(root, UDim2.new(0, 420, 0, 22), UDim2.new(1, -444, 1, -32), 15, Enum.TextXAlignment.Right)
@@ -717,7 +791,37 @@ function HudController.start()
 	LookController.setThreatTier(2)
 
 	Remotes.event("RunEvent").OnClientEvent:Connect(function(payload: any)
-		if typeof(payload) ~= "table" or payload.kind ~= "overseerBark" then
+		if typeof(payload) ~= "table" then
+			return
+		end
+
+		-- Everything except the bark used to fall out of this handler on the
+		-- first line, so extraction, run end and pad openings all arrived and
+		-- were discarded.
+		if payload.kind == "padOpened" then
+			bannerLabel.Text = string.format("%s PAD OPEN", string.upper(tostring(payload.zone)))
+			bannerLabel.TextColor3 = GOOD
+			bannerUntil = os.clock() + BANNER_SECONDS
+			return
+		elseif payload.kind == "playerExtracted" then
+			if payload.playerId == player.UserId then
+				HudController.showSummary(true, payload.zone, payload.value or 0)
+			else
+				bannerLabel.Text = "A SQUADMATE EXTRACTED"
+				bannerLabel.TextColor3 = DIM
+				bannerUntil = os.clock() + BANNER_SECONDS
+			end
+			return
+		elseif payload.kind == "playerDied" then
+			if payload.playerId == player.UserId then
+				HudController.showSummary(false, nil, payload.droppedValue or 0)
+			end
+			return
+		elseif payload.kind == "runEnded" then
+			return
+		end
+
+		if payload.kind ~= "overseerBark" then
 			return
 		end
 		local bark = payload.bark

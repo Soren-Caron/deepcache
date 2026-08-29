@@ -13,8 +13,8 @@ local Repair = require("../src/shared/core/sim/Repair")
 
 local P: Repair.Params = {
 	charges = 2,
-	healAmount = 45,
-	channelSeconds = 2.5,
+	healAmount = 40,
+	channelSeconds = 2.0,
 }
 
 t.describe("sim/Repair starting", function()
@@ -77,21 +77,63 @@ t.describe("sim/Repair starting", function()
 end)
 
 t.describe("sim/Repair channelling", function()
-	t.it("heals nothing before the channel finishes", function()
+	t.it("pays out continuously rather than only at the end", function()
+		-- An all-or-nothing channel feels dead for its whole duration: you hold
+		-- a key and nothing happens until it either works or does not.
 		local s = Repair.new(P)
 		Repair.begin(s, 100, 50, 100, P)
-		local done, heal = Repair.collect(s, 102, P)
+		local done, heal = Repair.collect(s, 101, P)
 		expect(done).toBeFalsy()
-		expect(heal).toEqual(0)
+		expect(heal > 0).toBeTruthy()
 		expect(Repair.isChannelling(s)).toBeTruthy()
 	end)
 
-	t.it("heals once the channel completes", function()
+	t.it("accelerates, so most of the value lands late", function()
+		-- Half way through has paid a quarter. That is what keeps the payout
+		-- responsive without making an early bail as good as finishing.
+		expect(Repair.healedFraction(0)).toEqual(0)
+		expect(Repair.healedFraction(0.5)).approx(0.25, 1e-9)
+		expect(Repair.healedFraction(1)).toEqual(1)
+		-- The final third carries more than the first two thirds combined.
+		local lastThird = Repair.healedFraction(1) - Repair.healedFraction(2 / 3)
+		expect(lastThird > Repair.healedFraction(2 / 3)).toBeTruthy()
+	end)
+
+	t.it("clamps a progress outside 0..1", function()
+		expect(Repair.healedFraction(-3)).toEqual(0)
+		expect(Repair.healedFraction(9)).toEqual(1)
+	end)
+
+	t.it("never pays more than the full heal across a channel", function()
+		local s = Repair.new(P)
+		Repair.begin(s, 100, 10, 100, P)
+		local total = 0
+		for step = 0, 40 do
+			local _, heal = Repair.collect(s, 100 + step * 0.1, P)
+			total += heal
+		end
+		expect(total).approx(P.healAmount, 1e-6)
+	end)
+
+	t.it("keeps what it already paid when interrupted", function()
+		-- The other half of the accelerating curve: bailing early is weak, not
+		-- worthless. The charge is still gone.
 		local s = Repair.new(P)
 		Repair.begin(s, 100, 50, 100, P)
-		local done, heal = Repair.collect(s, 102.5, P)
+		local _, paid = Repair.collect(s, 101, P)
+		Repair.cancel(s)
+		expect(paid > 0).toBeTruthy()
+		expect(paid < P.healAmount).toBeTruthy()
+		expect(s.chargesLeft).toEqual(1)
+	end)
+
+	t.it("completes at the end of the channel", function()
+		local s = Repair.new(P)
+		Repair.begin(s, 100, 50, 100, P)
+		local done, heal = Repair.collect(s, 102, P)
 		expect(done).toBeTruthy()
-		expect(heal).toEqual(P.healAmount)
+		-- Nothing collected in between, so the whole heal arrives in one delta.
+		expect(heal).approx(P.healAmount, 1e-9)
 		expect(Repair.isChannelling(s)).toBeFalsy()
 	end)
 
@@ -109,7 +151,7 @@ t.describe("sim/Repair channelling", function()
 		local s = Repair.new(P)
 		Repair.begin(s, 100, 50, 100, P)
 		expect(Repair.progress(s, 100, P)).approx(0, 1e-9)
-		expect(Repair.progress(s, 101.25, P)).approx(0.5, 1e-9)
+		expect(Repair.progress(s, 101, P)).approx(0.5, 1e-9)
 		expect(Repair.progress(s, 999, P)).toEqual(1)
 	end)
 
@@ -167,7 +209,7 @@ t.describe("config/Repair", function()
 	end)
 
 	t.it("costs long enough to be a commitment", function()
-		expect(RepairConfig.channelSeconds >= 1.5).toBeTruthy()
+		expect(RepairConfig.channelSeconds >= 1.2).toBeTruthy()
 	end)
 
 	t.it("takes longer than a sweep buys you", function()

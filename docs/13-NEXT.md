@@ -144,6 +144,38 @@ same document is wrong.
 
 ## 3. Known bugs and rough edges
 
+~~**Extraction produced no feedback at all.**~~ The win condition of the game,
+and reaching an open pad showed nothing but the REDEPLOY button. The cause was
+one line: the HUD's `RunEvent` handler opened with
+`if payload.kind ~= "overseerBark" then return end`, so `playerExtracted`
+(carrying the banked value), `runEnded` (carrying the full summary) and
+`padOpened` all arrived and were discarded. Succeeding was quieter than dying.
+
+There is now an end-of-run card — **EXTRACTED / +542 credits banked / out via
+Perimeter at 5:07**, or **LOST / N credits left on the floor** — plus a
+transient banner for pad openings and squadmates extracting. Verified against a
+real extraction through `extractProbe`.
+
+That also surfaced a contradiction: the status line repeated the payout from
+`latest.value`, which is *carried* value and is zeroed at the moment of
+banking, so the screen simultaneously read "+542 credits banked" and
+"EXTRACTED +0 credits". The card owns that number now.
+
+~~**Ranged enemies spawned inside props.**~~ Entities are pure simulation with
+no collision against level geometry, so nothing stopped one occupying a crate —
+and a Sentry has speed 0, so it stayed there. Spawn points are now filtered
+against the props in their own module, cleared by the prop's diagonal plus the
+largest hitbox in the roster. Verified across a real wave: **0 of 8 entities
+overlapping any of 113 props, tightest clearance 4.32 studs.**
+
+**Healing was too slow, and is now continuous.** The first version paid out only
+on completion, so holding the key did visibly nothing for 2.5 seconds. Health
+now arrives against `progress^2` from the first frame — the bar moves
+immediately, half way through has paid a quarter, and the final third still
+carries over half the value. Channel shortened to 1.6 s. An interrupted channel
+keeps what it already paid, which is what makes bailing early weak rather than
+worthless; the charge is still spent.
+
 ~~**Enemies died into a grey crate.**~~ Reported as "when I sweep kill enemies
 it spawns these in their place", and it was the same drift as the hitbox bug.
 `RagdollController` was written at M7-4 when entities really were boxes, so the

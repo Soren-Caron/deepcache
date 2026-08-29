@@ -302,6 +302,15 @@ end
 
 --- Set dressing against the walls. Positions come from pure core; this turns
 --- them into parts.
+--- Footprints of the props placed in the module currently being built, so
+--- spawn points can be kept out of them.
+---
+--- Entities are pure simulation with no collision against level geometry:
+--- nothing stops one occupying the same space as a crate, and a Sentry has
+--- speed 0, so one that spawns inside a prop stays inside it forever. Reported
+--- from play as ranged enemies spawning in prop blocks.
+local propFootprints: { { x: number, z: number, radius: number } } = {}
+
 local function buildProps(
 	model: Model,
 	module_: Assemble.PlacedModule,
@@ -338,6 +347,15 @@ local function buildProps(
 			continue
 		end
 		local size = Vector3.new(kind.size.x, kind.size.y, kind.size.z) * placement.scale
+		-- Radius that covers the box's diagonal in the ground plane, so a spawn
+		-- point cleared against it is clear of the whole footprint however the
+		-- prop is rotated.
+		table.insert(propFootprints, {
+			x = placement.x,
+			z = placement.z,
+			radius = math.sqrt(size.X * size.X + size.Z * size.Z) / 2,
+		})
+
 		makeProp(
 			`Prop_{index}_{placement.kind}`,
 			size,
@@ -352,6 +370,22 @@ local function buildProps(
 			Enum.Material[kind.material] :: Enum.Material
 		)
 	end
+end
+
+--- Largest hitbox any kind has, so one clearance figure serves them all.
+--- Cheaper than filtering per kind, and erring wide only costs a spawn point in
+--- a room that has plenty.
+local LARGEST_HITBOX = 4.0
+
+--- Is `(x, z)` far enough from every prop in this module to spawn something?
+local function clearOfProps(x: number, z: number): boolean
+	for _, prop in propFootprints do
+		local dx, dz = x - prop.x, z - prop.z
+		if math.sqrt(dx * dx + dz * dz) < prop.radius + LARGEST_HITBOX then
+			return false
+		end
+	end
+	return true
 end
 
 --- Points inside a module, inset from the walls, for enemy and loot spawning.
@@ -376,11 +410,11 @@ local function spawnPointsIn(module_: Assemble.PlacedModule): { Types.Vec3 }
 		for column = 1, columns do
 			local fx = if columns == 1 then 0.5 else (column - 1) / (columns - 1)
 			local fz = if rows == 1 then 0.5 else (row - 1) / (rows - 1)
-			table.insert(out, {
-				x = module_.at.x - usableW / 2 + fx * usableW,
-				y = 0,
-				z = module_.at.z - usableD / 2 + fz * usableD,
-			})
+			local px = module_.at.x - usableW / 2 + fx * usableW
+			local pz = module_.at.z - usableD / 2 + fz * usableD
+			if clearOfProps(px, pz) then
+				table.insert(out, { x = px, y = 0, z = pz })
+			end
 		end
 	end
 	return out
@@ -499,6 +533,9 @@ function LevelService.build(seed: number): Assemble.Layout
 		end
 
 		buildCeiling(model, module_, pal)
+		-- Per module: `clearOfProps` is only ever asked about the module whose
+		-- spawn points are being generated next.
+		table.clear(propFootprints)
 		buildProps(model, module_, pal, seed, widths)
 
 		for _, point in spawnPointsIn(module_) do

@@ -23,6 +23,11 @@ Repair.charges = 2
 Repair.healAmount = 45
 
 --- Seconds of standing still. Taking damage cancels it and the charge is gone.
-Repair.channelSeconds = 2.5
+---
+--- Was 2.5, which played as sluggish: with an all-or-nothing payout the key
+--- did visibly nothing for two and a half seconds. Health now arrives on an
+--- accelerating curve from the first frame, and the channel is shorter, so it
+--- reads as fast without becoming free.
+Repair.channelSeconds = 1.6
 
 return Repair
