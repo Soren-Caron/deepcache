@@ -7,6 +7,7 @@
 	while the authoritative answer is in flight.
 ]]
 
+local Players = game:GetService("Players")
 local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 
 local Branding = require(Shared.config.Branding)
@@ -153,6 +154,14 @@ local function main()
 	end)
 
 	PredictionController.start()
+
+	-- The `systems` gate for the loading screen in ReplicatedFirst. An
+	-- attribute rather than a remote or a BindableEvent because ReplicatedFirst
+	-- runs before ReplicatedStorage has necessarily filled in, and a player
+	-- attribute is readable the moment either side sets it, with no ordering
+	-- question and nothing to clean up. If this never fires the screen releases
+	-- on its timeout and warns, rather than trapping the player.
+	Players.LocalPlayer:SetAttribute("dcClientReady", true)
 
 	print(`[{Branding.gameName}] client up — entities, prediction, HUD, corrections, market, look, ragdolls`)
 end

@@ -177,6 +177,51 @@ Allocation, fixed:
 
 Hero assets (weapons, extraction pads, the Warden) get proper `SurfaceAppearance` with albedo/normal/roughness/metalness. Everything else uses `MaterialVariant` with tuned base materials. This is the cheap-but-effective layer.
 
+## The boot screen
+
+The first thing a player sees is a black room. Roblox's own loading screen
+leaves once the *engine* is ready, which here is seconds before there is
+anything to look at: the level is generated server-side and parented to
+Workspace in one go, so until it lands the client renders an unlit facility
+with the HUD floating over it. Measured in Studio — where the server is
+local and the geometry is already resident — that gap is **1.66 s**. On a real
+client over the network it is longer, and it reads as a broken game rather
+than a loading one.
+
+`src/replicatedfirst/LoadingScreen.client.luau` covers it. ReplicatedFirst is
+the only place that runs before the DataModel fills in, and the backdrop is
+created *before* `RemoveDefaultLoadingScreen` so there is never a frame with
+neither screen up — that frame is the black room.
+
+The decidable part lives in `core/boot/LoadGate`:
+
+| Gate | Answered by |
+|---|---|
+| `engine` | `game:IsLoaded()` |
+| `world` | `Workspace.Level` exists with its `seed` attribute |
+| `assets` | `ContentProvider.RequestQueueSize == 0`, **only once `world` is open** |
+| `avatar` | character has a HumanoidRootPart and a Humanoid |
+| `systems` | `dcClientReady` attribute, set by `Bootstrap.client` after `main()` |
+
+Three rules the module exists to enforce, each of which is a way a loading
+screen gets worse than no loading screen:
+
+- **Gates latch.** `RequestQueueSize` drops to zero and rises again as more
+  geometry streams. Latching the answer rather than clamping the number is
+  what keeps the bar monotonic, and it puts the reason in one place instead of
+  in a `math.max` someone has to reverse-engineer.
+- **The `assets` gate is not asked before `world` opens.** The queue is
+  legitimately empty before the level exists, so asking early would latch it
+  instantly and claim the geometry was ready before the server had sent it.
+- **There is a floor and a ceiling.** `minSeconds` (0.7) stops a one-frame
+  flash on a warm client; `timeoutSeconds` (25) releases regardless and warns,
+  because a screen that never leaves is worse than the room it hides.
+
+The bar also stops at 99% until genuinely complete — a full bar that is still
+waiting is what makes a loading screen feel hung — and eases toward its target
+rather than snapping, because the gates open in a few large jumps and a bar
+that teleports from 10% to 70% reads as a glitch.
+
 ## Performance budget
 
 Client frame budget at 3 players, 40 entities, 1080p, mid-range hardware:
@@ -199,6 +244,10 @@ Pure-core:
 - `TwoBoneIk`: reachable, exactly-reachable, unreachable, degenerate coincident points, pole-vector plane correctness.
 - `StepPlanner`: gait phase never lifts opposing legs simultaneously; step commits only past threshold; body height tracks foot mean.
 - `Ramp`: palette interpolation endpoints and midpoint values.
+- `LoadGate`: a flickering gate never rewinds the bar; unknown gate ids do not
+  count toward completion; the bar stops short of full while still waiting;
+  the minimum holds and the timeout releases; easing is frame-rate independent
+  and never overshoots.
 
 In-Studio (MCP):
 - Spawn 40 entities on varied terrain, capture screenshots at each LOD boundary, verify visually that no popping is visible at transitions.

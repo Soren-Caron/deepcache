@@ -451,3 +451,37 @@ When something seems missing in-game, check the wiring before the logic — and
 prefer a probe registered from the live context over anything `require`d from
 the command bar, which returns a fresh idle copy whose entities no tick phase
 ever steps. That trap produced two invalid test results in this branch alone.
+
+And one more, from the boot screen: **the guard that would have caught it did
+not exist yet.** `config/Boot` was written without a `return`, which compiles,
+syncs and builds cleanly — Luau then hands callers `true`, and the failure
+surfaces as "attempt to index boolean" at the *call site*, four test cases away
+from the file that is wrong. `tools/check-syntax` now lints for a missing
+top-level return in anything under `src/` that is not a `.server`/`.client`
+script, and the lint was confirmed by deleting the `return` again and watching
+it fire. Same shape as the BOM guard: a whole-file defect that only the file
+itself can see.
+
+## 8. The boot loading screen
+
+**Added.** Roblox's loading screen leaves when the *engine* is ready; the level
+is generated server-side and parented to Workspace in one go, so the client
+spends the gap rendering an unlit room with the HUD over it. Measured in
+Studio — local server, geometry already resident, the best case that exists —
+the gap is **1.66 s**. Over a real network it is longer.
+
+`src/replicatedfirst/LoadingScreen.client.luau` plus `core/boot/LoadGate` and
+`config/Boot`. Design notes are in [docs/08](08-PRESENTATION.md#the-boot-screen).
+Verified in Studio: phases advanced to `READY`, released at **1.656 s**,
+`timedOut=false`, and the ScreenGui destroyed itself after the fade.
+
+Two things worth knowing before touching it:
+
+- **`ReplicatedFirst` is a new mapped subtree** in `default.project.json`.
+  Rojo must be restarted *and reconnected in Studio* to pick up a new mapping —
+  a running server does not notice project-file changes, and the plugin needs a
+  manual Connect after the server restarts.
+- The Studio verification of the visuals used an **injected copy** of the
+  script, because the plugin was disconnected at the time. It has been deleted;
+  Rojo owns `ReplicatedFirst` on reconnect. The behavioural numbers above came
+  from that copy, so they are worth re-confirming once the real file syncs.
